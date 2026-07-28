@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Snap to Play</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html, body {
+    width: 100%;
+    height: 100%;
+    background: #111;
+    font-family: -apple-system, "Helvetica Neue", "PingFang TC", "Noto Sans TC", sans-serif;
+    color: #eee;
+    overflow: hidden;
+  }
+
+  #stage {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 20px;
+  }
+
+  #startBtn {
+    padding: 14px 36px;
+    font-size: 18px;
+    border: 1px solid #444;
+    border-radius: 4px;
+    background: #1f1f1f;
+    color: #eee;
+    cursor: pointer;
+  }
+  #startBtn:hover { background: #2a2a2a; }
+  #startBtn:disabled { opacity: 0.5; cursor: default; }
+
+  #status {
+    font-size: 15px;
+    color: #999;
+    letter-spacing: 0.5px;
+  }
+
+  #camWrap {
+    position: relative;
+    width: 480px;
+    max-width: 90vw;
+    display: none;
+    border: 1px solid #333;
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  #cam {
+    width: 100%;
+    display: block;
+    transform: scaleX(-1); /* mirror for natural feel */
+  }
+  #overlay {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    transform: scaleX(-1);
+    pointer-events: none;
+  }
+
+  #snapFlash {
+    font-size: 15px;
+    color: #6fcf97;
+    opacity: 0;
+    transition: opacity 0.4s;
+  }
+  #snapFlash.show { opacity: 1; transition: opacity 0s; }
+
+  #player {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    background: #000;
+    object-fit: contain;
+    display: none;
+    z-index: 10;
+  }
+</style>
+</head>
+<body>
+
+<div id="stage">
+  <button id="startBtn">Start Camera 開啟相機偵測</button>
+  <div id="status">Click to enable camera 點擊啟用相機</div>
+  <div id="camWrap">
+    <video id="cam" autoplay playsinline muted></video>
+    <canvas id="overlay"></canvas>
+  </div>
+  <div id="snapFlash">Snap detected!</div>
+</div>
+
+<video id="player" src="video.mp4" playsinline preload="auto"></video>
+
+<script type="module">
+/* ============================================================
+   Tunables — adjust snap detection here
+   All distances are normalized by hand size (wrist → middle
+   finger base), so they work at any distance from the camera.
+   ============================================================ */
+const VIDEO_SRC       = 'video.mp4'; // ← put your video file here (same folder)
+const PINCH_ON        = 0.30;  // thumb–middle tip distance below this = "primed" (fingers together)
+const RELEASE_OFF     = 0.75;  // distance above this after priming = snap released
+const SNAP_WINDOW_MS  = 400;   // release must happen within this time after priming
+const COOLDOWN_MS     = 1500;  // ignore further snaps for this long after triggering
+const RESTART_ON_SNAP = true;  // snap while video playing → restart from beginning
+const SHOW_LANDMARKS  = true;  // draw thumb/middle fingertip dots on the preview
+/* ============================================================ */
+
+import { HandLandmarker, FilesetResolver } from
+  'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs';
+
+const startBtn  = document.getElementById('startBtn');
+const statusEl  = document.getElementById('status');
+const camWrap   = document.getElementById('camWrap');
+const cam       = document.getElementById('cam');
+const overlay   = document.getElementById('overlay');
+const ctx       = overlay.getContext('2d');
+const snapFlash = document.getElementById('snapFlash');
+const player    = document.getElementById('player');
+
+player.src = VIDEO_SRC;
+
+let landmarker = null;
+let running = false;
+let lastVideoTime = -1;
+
+// snap state machine
+let primed = false;
+let primedAt = 0;
+let lastSnapAt = 0;
+
+startBtn.addEventListener('click', async () => {
+  startBtn.disabled = true;
+  try {
+    statusEl.textContent = 'Loading hand model… 載入手部模型中…';
+    const vision = await FilesetResolver.forVisionTasks(
+      'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
+    );
+    landmarker = await HandLandmarker.createFromOptions(vision, {
+      baseOptions: {
+        modelAssetPath:
+          'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+        delegate: 'GPU'
+      },
+      runningMode: 'VIDEO',
+      numHands: 1
+    });
+
+    statusEl.textContent = 'Requesting camera… 請求相機權限…';
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: 640, height: 480, facingMode: 'user' }
+    });
+    cam.srcObject = stream;
+    await new Promise(res => cam.onloadedmetadata = res);
+    await cam.play();
+
+    overlay.width = cam.videoWidth;
+    overlay.height = cam.videoHeight;
+
+    startBtn.style.display = 'none';
+    camWrap.style.display = 'block';
+    statusEl.textContent = 'Watching… snap your fingers 偵測中…請彈指';
+    running = true;
+    requestAnimationFrame(tick);
+  } catch (err) {
+    startBtn.disabled = false;
+    statusEl.textContent = 'Failed to start 啟動失敗: ' + (err.message || err.name);
+  }
+});
+
+function dist(a, b) {
+  const dx = a.x - b.x, dy = a.y - b.y, dz = (a.z || 0) - (b.z || 0);
+  return Math.sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+function tick() {
+  if (!running) return;
+
+  if (cam.currentTime !== lastVideoTime) {
+    lastVideoTime = cam.currentTime;
+    const result = landmarker.detectForVideo(cam, performance.now());
+    processHands(result);
+  }
+  requestAnimationFrame(tick);
+}
+
+function processHands(result) {
+  ctx.clearRect(0, 0, overlay.width, overlay.height);
+
+  const now = performance.now();
+  const hand = result.landmarks && result.landmarks[0];
+
+  if (!hand) {
+    primed = false;
+    return;
+  }
+
+  const wrist     = hand[0];
+  const middleMcp = hand[9];
+  const thumbTip  = hand[4];
+  const middleTip = hand[12];
+
+  // normalize by hand size so detection works near or far
+  const handSize = dist(wrist, middleMcp);
+  if (handSize < 1e-6) return;
+  const pinchDist = dist(thumbTip, middleTip) / handSize;
+
+  if (SHOW_LANDMARKS) {
+    drawDot(thumbTip, primed ? '#6fcf97' : '#4a90d9');
+    drawDot(middleTip, primed ? '#6fcf97' : '#4a90d9');
+  }
+
+  // state machine: pinch (primed) → fast release = snap
+  if (!primed) {
+    if (pinchDist < PINCH_ON) {
+      primed = true;
+      primedAt = now;
+    }
+  } else {
+    if (pinchDist > RELEASE_OFF) {
+      primed = false;
+      if (now - primedAt < SNAP_WINDOW_MS && now - lastSnapAt > COOLDOWN_MS) {
+        lastSnapAt = now;
+        onSnap();
+      }
+    } else if (now - primedAt > SNAP_WINDOW_MS && pinchDist > PINCH_ON) {
+      // held too long without releasing — reset so a slow open doesn't trigger
+      primed = false;
+    }
+  }
+}
+
+function drawDot(pt, color) {
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.arc(pt.x * overlay.width, pt.y * overlay.height, 8, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function onSnap() {
+  snapFlash.classList.add('show');
+  setTimeout(() => snapFlash.classList.remove('show'), 500);
+
+  if (player.style.display === 'block') {
+    if (RESTART_ON_SNAP) {
+      player.currentTime = 0;
+      player.play();
+    }
+    return;
+  }
+
+  player.style.display = 'block';
+  player.currentTime = 0;
+  player.play().catch(err => {
+    statusEl.textContent = 'Video play failed 影片播放失敗: ' + err.message +
+      ' (check that ' + VIDEO_SRC + ' exists)';
+    player.style.display = 'none';
+  });
+}
+
+// when the video ends, go back to standby and keep detecting
+player.addEventListener('ended', () => {
+  player.style.display = 'none';
+  statusEl.textContent = 'Watching… snap your fingers 偵測中…請彈指';
+});
+</script>
+
+</body>
+</html>
