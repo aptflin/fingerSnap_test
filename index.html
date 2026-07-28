@@ -268,7 +268,6 @@ function onSnap() {
   });
 }
 
-// when the video ends, go back to standby and keep detecting
 player.addEventListener('ended', () => {
   player.style.display = 'none';
   statusEl.textContent = 'Watching… snap your fingers 偵測中…請彈指';
