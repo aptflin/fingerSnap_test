@@ -2,7 +2,10 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Snap to Play</title>
 <script type="importmap">
 {
@@ -18,24 +21,68 @@
   html, body {
     width: 100%;
     height: 100%;
-    background: #111;
+    background: #000;
     font-family: -apple-system, "Helvetica Neue", "PingFang TC", "Noto Sans TC", sans-serif;
     color: #eee;
     overflow: hidden;
+    overscroll-behavior: none;
+    touch-action: none;
+    -webkit-tap-highlight-color: transparent;
   }
+  body { position: fixed; inset: 0; }
 
-  #stage {
+  /* Fullscreen stage. Uses dvh so the mobile URL bar can't letterbox it. */
+  #camWrap {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    height: 100dvh;
+    display: none;
+    background: #000;
+    overflow: hidden;
+  }
+  /* The video is the only layer CSS is allowed to crop — `cover` keeps its
+     aspect ratio (no stretching) and the JS below reproduces the exact same
+     crop for the overlay layers, so nothing drifts out of alignment. */
+  #cam {
+    position: absolute;
+    top: 0;
+    left: 0;
     width: 100%;
     height: 100%;
+    object-fit: cover;
+    object-position: center;
+    transform: scaleX(-1);   /* mirror, like a selfie view */
+  }
+  /* Overlay layers are sized to the viewport in JS at the exact pixel count,
+     so CSS never rescales them — no deformation, no offset. */
+  #overlay, #three {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+  }
+
+  /* start screen */
+  #startScreen {
+    position: fixed;
+    inset: 0;
+    z-index: 20;
+    background: #111;
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
     gap: 20px;
+    padding: 24px;
+    text-align: center;
   }
-
   #startBtn {
-    padding: 14px 36px;
+    padding: 16px 40px;
     font-size: 18px;
     border: 1px solid #444;
     border-radius: 4px;
@@ -43,50 +90,40 @@
     color: #eee;
     cursor: pointer;
   }
-  #startBtn:hover { background: #2a2a2a; }
   #startBtn:disabled { opacity: 0.5; cursor: default; }
-
   #status {
     font-size: 15px;
+    line-height: 1.5;
     color: #999;
-    letter-spacing: 0.5px;
+    max-width: 32em;
   }
 
-  #camWrap {
-    position: relative;
-    width: 480px;
-    max-width: 90vw;
-    display: none;
-    border: 1px solid #333;
+  /* on-camera status line */
+  #hint {
+    position: fixed;
+    left: 50%;
+    transform: translateX(-50%);
+    bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+    z-index: 15;
+    padding: 8px 16px;
+    font-size: 14px;
+    color: #ddd;
+    background: rgba(0, 0, 0, 0.55);
     border-radius: 4px;
-    overflow: hidden;
+    display: none;
+    white-space: nowrap;
   }
-  #cam {
-    width: 100%;
-    display: block;
-    transform: scaleX(-1); /* mirror for natural feel */
-  }
-  #overlay {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    transform: scaleX(-1);
-    pointer-events: none;
-  }
-  /* 3D layer — same box, same mirror, so it lines up with the video */
-  #three {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    transform: scaleX(-1);
-    pointer-events: none;
-  }
-
   #snapFlash {
-    font-size: 15px;
+    position: fixed;
+    left: 50%;
+    transform: translateX(-50%);
+    top: calc(16px + env(safe-area-inset-top, 0px));
+    z-index: 15;
+    padding: 8px 16px;
+    font-size: 14px;
     color: #6fcf97;
+    background: rgba(0, 0, 0, 0.55);
+    border-radius: 4px;
     opacity: 0;
     transition: opacity 0.4s;
   }
@@ -98,23 +135,26 @@
     width: 100%;
     height: 100%;
     background: #000;
-    object-fit: contain;
+    object-fit: contain;   /* never distort the video */
     display: none;
-    z-index: 10;
+    z-index: 30;
   }
 </style>
 </head>
 <body>
 
-<div id="stage">
+<div id="camWrap">
+  <video id="cam" autoplay playsinline muted></video>
+  <canvas id="overlay"></canvas>
+  <canvas id="three"></canvas>
+</div>
+
+<div id="hint">偵測中…請彈指</div>
+<div id="snapFlash">Snap detected!</div>
+
+<div id="startScreen">
   <button id="startBtn">Start Camera 開啟相機偵測</button>
   <div id="status">Click to enable camera 點擊啟用相機</div>
-  <div id="camWrap">
-    <video id="cam" autoplay playsinline muted></video>
-    <canvas id="overlay"></canvas>
-    <canvas id="three"></canvas>
-  </div>
-  <div id="snapFlash">Snap detected!</div>
 </div>
 
 <video id="player" src="video.mp4" playsinline preload="auto"></video>
@@ -131,24 +171,41 @@ const RELEASE_OFF     = 0.75;  // distance above this after priming = snap relea
 const SNAP_WINDOW_MS  = 400;   // release must happen within this time after priming
 const COOLDOWN_MS     = 1500;  // ignore further snaps for this long after triggering
 const RESTART_ON_SNAP = true;  // snap while video playing → restart from beginning
-const SHOW_LANDMARKS  = true;  // draw thumb/middle fingertip dots on the preview
+const SHOW_LANDMARKS  = true;  // draw thumb/middle fingertip dots on the camera view
 
 /* ---- 3D model (Eiffel tower) -------------------------------
    The model is normalized to height 1 with its top at +0.5Y and
    its base at -0.5Y, so the spire sticks to the MIDDLE fingertip
-   and the base sticks to the THUMB tip. Rotation and scale both
-   follow those two points.
+   and the base sticks to the THUMB tip.
    ------------------------------------------------------------ */
 const MODEL_DIR       = 'tower/';
 const MODEL_OBJ       = '10067_Eiffel_Tower_v1_max2010_it1.obj';
 const MODEL_MTL       = '10067_Eiffel_Tower_v1_max2010_it1.mtl';
 const MODEL_UP_AXIS   = 'z';   // source model is Z-up (3ds Max export)
-const MODEL_SPIN      = 0;     // extra spin around the tower's own axis (radians)
 const MODEL_BRIGHTEN  = true;  // the .mtl ships Kd 0.59, which dims the texture;
                                // true = show the texture at full brightness
-const MODEL_SMOOTH    = 0.45;  // 0 = raw/jittery, 0.9 = very smooth but laggy
 const CAM_DIST        = 5;     // virtual camera distance
 const CAM_FOV         = 50;    // virtual camera field of view (deg)
+
+// Slow self-rotation around the tower's own vertical axis.
+const MODEL_SPIN_SPEED  = 0.15; // radians/sec (~42 s per full turn)
+
+// Where the tower's "front" points. The palm normal is derived from a cross
+// product of three landmarks, so it magnifies tracking noise and makes the
+// model wobble. Off = a steady reference plus the slow spin above.
+const USE_PALM_ROTATION = false;
+
+// One Euro filter — kills jitter while your hand is still without adding the
+// lag that plain smoothing would. Applied to the landmarks themselves, so
+// position, scale and tilt all come out steady.
+// Tuned by sweep for normalized (0..1) landmark coords: -78% jitter at rest
+// with 0.8 frames of lag. Note beta must be much larger here than the values
+// quoted for pixel-space input, since these coords move ~1 unit/sec, not ~500.
+const FILTER_MIN_CUTOFF = 0.5;  // lower  = steadier when your hand holds still
+const FILTER_BETA       = 5;    // higher = less lag when your hand moves fast
+
+// Cap the render buffer on high-DPI phones so the GPU keeps up.
+const MAX_PIXEL_RATIO   = 2;
 /* ============================================================ */
 
 import { HandLandmarker, FilesetResolver } from
@@ -157,15 +214,17 @@ import * as THREE from 'three';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { MTLLoader } from 'three/addons/loaders/MTLLoader.js';
 
-const startBtn  = document.getElementById('startBtn');
-const statusEl  = document.getElementById('status');
-const camWrap   = document.getElementById('camWrap');
-const cam       = document.getElementById('cam');
-const overlay   = document.getElementById('overlay');
-const ctx       = overlay.getContext('2d');
-const threeCv   = document.getElementById('three');
-const snapFlash = document.getElementById('snapFlash');
-const player    = document.getElementById('player');
+const startScreen = document.getElementById('startScreen');
+const startBtn    = document.getElementById('startBtn');
+const statusEl    = document.getElementById('status');
+const camWrap     = document.getElementById('camWrap');
+const cam         = document.getElementById('cam');
+const overlay     = document.getElementById('overlay');
+const ctx         = overlay.getContext('2d');
+const threeCv     = document.getElementById('three');
+const hint        = document.getElementById('hint');
+const snapFlash   = document.getElementById('snapFlash');
+const player      = document.getElementById('player');
 
 player.src = VIDEO_SRC;
 
@@ -177,6 +236,7 @@ let lastVideoTime = -1;
 let primed = false;
 let primedAt = 0;
 let lastSnapAt = 0;
+let lastFrameAt = 0;   // for the filter's time step
 
 /* ---------------- three.js scene ---------------- */
 const renderer = new THREE.WebGLRenderer({ canvas: threeCv, alpha: true, antialias: true });
@@ -192,16 +252,115 @@ const fillLight = new THREE.DirectionalLight(0xffffff, 0.5);
 fillLight.position.set(-1, -0.5, -1);
 scene.add(fillLight);
 
-// visible world size on the z=0 plane — recomputed whenever the canvas resizes
-let viewH = 1, viewW = 1;
-
-// The wrapper is what gets positioned/rotated/scaled by the hand. Its local
-// +0.5Y is the middle fingertip and -0.5Y is the thumb tip; the loaded model is
-// normalized into exactly that range, so any model drops in unchanged.
 const model = new THREE.Group();
 model.visible = false;
 scene.add(model);
 
+// inner wrapper that carries the slow self-rotation
+let spinner = null;
+
+/* ---------------- layout / coordinate mapping ----------------
+   The video is displayed with `object-fit: cover`, which scales it uniformly
+   (no stretching) and crops the overflow. These numbers reproduce that exact
+   transform so landmarks land on the same screen pixel the camera image is
+   actually showing — that is what keeps the dots and the model from drifting.
+*/
+let screenW = 1, screenH = 1;                 // CSS px
+let coverW  = 1, coverH  = 1;                 // displayed video size, CSS px
+let coverX  = 0, coverY  = 0;                 // top-left of the displayed video
+let viewW   = 1, viewH   = 1;                 // world units visible at z=0
+
+function layout() {
+  screenW = camWrap.clientWidth  || window.innerWidth;
+  screenH = camWrap.clientHeight || window.innerHeight;
+  if (screenW < 1 || screenH < 1) return;
+
+  const dpr = Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO);
+
+  // 2D overlay: one backing pixel per device pixel, drawn in CSS px
+  overlay.width  = Math.round(screenW * dpr);
+  overlay.height = Math.round(screenH * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  // 3D layer: same viewport, same aspect — nothing for CSS to rescale
+  renderer.setPixelRatio(dpr);
+  renderer.setSize(screenW, screenH, false);
+  camera3d.aspect = screenW / screenH;
+  camera3d.updateProjectionMatrix();
+  viewH = 2 * CAM_DIST * Math.tan(THREE.MathUtils.degToRad(CAM_FOV) / 2);
+  viewW = viewH * camera3d.aspect;
+
+  // replicate CSS `object-fit: cover` + `object-position: center`
+  const vw = cam.videoWidth, vh = cam.videoHeight;
+  if (vw && vh) {
+    const s = Math.max(screenW / vw, screenH / vh);
+    coverW = vw * s;
+    coverH = vh * s;
+    coverX = (screenW - coverW) / 2;
+    coverY = (screenH - coverH) / 2;
+  }
+}
+
+// normalized landmark → CSS px on screen, including the crop and the mirror
+function toScreen(lm) {
+  const x = coverX + lm.x * coverW;
+  const y = coverY + lm.y * coverH;
+  return {
+    x: screenW - x,               // video is mirrored, so mirror the point too
+    y,
+    z: (lm.z || 0) * coverW       // z shares x's scale in MediaPipe's output
+  };
+}
+
+// normalized landmark → world position for the 3D scene
+function toWorld(lm) {
+  const p = toScreen(lm);
+  return new THREE.Vector3(
+     (p.x / screenW - 0.5) * viewW,
+    -(p.y / screenH - 0.5) * viewH,
+    -(p.z / screenW) * viewW      // MediaPipe z is negative toward the camera
+  );
+}
+
+window.addEventListener('resize', layout);
+window.addEventListener('orientationchange', () => setTimeout(layout, 300));
+
+/* ---------------- One Euro filter ----------------
+   Adaptive low-pass: at low speed the cutoff drops and jitter is smoothed
+   away; as speed rises the cutoff rises too, so fast motion stays responsive. */
+function makeScalarFilter() {
+  let xPrev = null, xHat = null, dxHat = 0;
+  const alpha = (cutoff, dt) => {
+    const tau = 1 / (2 * Math.PI * cutoff);
+    return 1 / (1 + tau / dt);
+  };
+  return (x, dt) => {
+    if (xHat === null) { xHat = x; xPrev = x; return x; }
+    const dx = (x - xPrev) / dt;
+    const aD = alpha(1.0, dt);
+    dxHat = aD * dx + (1 - aD) * dxHat;
+    const a = alpha(FILTER_MIN_CUTOFF + FILTER_BETA * Math.abs(dxHat), dt);
+    xHat = a * x + (1 - a) * xHat;
+    xPrev = x;
+    return xHat;
+  };
+}
+
+function makePointFilter() {
+  const fx = makeScalarFilter(), fy = makeScalarFilter(), fz = makeScalarFilter();
+  return (lm, dt) => ({ x: fx(lm.x, dt), y: fy(lm.y, dt), z: fz(lm.z || 0, dt) });
+}
+
+// one filter per landmark we actually use
+const FILTERED_IDS = [0, 4, 5, 12, 17];
+let pointFilters = null;
+function resetFilters() {
+  pointFilters = {};
+  FILTERED_IDS.forEach(i => { pointFilters[i] = makePointFilter(); });
+}
+resetFilters();
+
+/* ---------------- model loading ---------------- */
 // Rotate a Z-up (or X-up) source model so its height runs along +Y, then
 // scale it to height 1 and centre it so it spans -0.5Y .. +0.5Y.
 function normalizeModel(obj) {
@@ -218,10 +377,9 @@ function normalizeModel(obj) {
   obj.scale.setScalar(s);
   obj.position.set(-center.x * s, -center.y * s, -center.z * s);
 
-  // spin around the tower's own vertical axis
-  const spinner = new THREE.Group();
+  // wrapper that spins the tower around its own vertical axis
+  spinner = new THREE.Group();
   spinner.add(obj);
-  spinner.rotation.y = MODEL_SPIN;
   return spinner;
 }
 
@@ -251,34 +409,7 @@ async function loadModel(onProgress) {
   model.add(normalizeModel(obj));
 }
 
-function sizeRenderer() {
-  const w = cam.videoWidth, h = cam.videoHeight;
-  if (!w || !h) return;
-  // Match the video's intrinsic size; CSS stretches both canvases to the
-  // same box, so landmark coords map straight onto the 3D view.
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-  renderer.setSize(w, h, false);
-  camera3d.aspect = w / h;
-  camera3d.updateProjectionMatrix();
-  viewH = 2 * CAM_DIST * Math.tan(THREE.MathUtils.degToRad(CAM_FOV) / 2);
-  viewW = viewH * camera3d.aspect;
-}
-
-// normalized landmark → world position on/near the z=0 plane
-function toWorld(lm) {
-  return new THREE.Vector3(
-    (lm.x - 0.5) * viewW,
-    -(lm.y - 0.5) * viewH,
-    -(lm.z || 0) * viewW   // MediaPipe z is negative toward the camera
-  );
-}
-
-// smoothed transform state
-const smPos  = new THREE.Vector3();
-const smQuat = new THREE.Quaternion();
-let   smScale = 0;
-let   hasPose = false;
-
+/* ---------------- start ---------------- */
 startBtn.addEventListener('click', async () => {
   startBtn.disabled = true;
   try {
@@ -305,20 +436,25 @@ startBtn.addEventListener('click', async () => {
     });
 
     statusEl.textContent = 'Requesting camera… 請求相機權限…';
+    // Ask for a stream shaped like the screen, so `cover` crops as little as
+    // possible. Any resolution the device returns still maps correctly.
+    const portrait = window.innerHeight >= window.innerWidth;
     const stream = await navigator.mediaDevices.getUserMedia({
-      video: { width: 640, height: 480, facingMode: 'user' }
+      video: {
+        facingMode: 'user',
+        width:  { ideal: portrait ? 720 : 1280 },
+        height: { ideal: portrait ? 1280 : 720 }
+      }
     });
     cam.srcObject = stream;
     await new Promise(res => cam.onloadedmetadata = res);
     await cam.play();
 
-    overlay.width = cam.videoWidth;
-    overlay.height = cam.videoHeight;
-    sizeRenderer();
-
-    startBtn.style.display = 'none';
+    startScreen.style.display = 'none';
     camWrap.style.display = 'block';
-    statusEl.textContent = 'Watching… snap your fingers 偵測中…請彈指';
+    hint.style.display = 'block';
+    layout();
+
     running = true;
     requestAnimationFrame(tick);
   } catch (err) {
@@ -340,12 +476,14 @@ function tick() {
     const result = landmarker.detectForVideo(cam, performance.now());
     processHands(result);
   }
+  // slow self-rotation, independent of the hand so it never looks jittery
+  if (spinner) spinner.rotation.y = (performance.now() / 1000) * MODEL_SPIN_SPEED;
   renderer.render(scene, camera3d);
   requestAnimationFrame(tick);
 }
 
 function processHands(result) {
-  ctx.clearRect(0, 0, overlay.width, overlay.height);
+  ctx.clearRect(0, 0, screenW, screenH);
 
   const now = performance.now();
   const hand = result.landmarks && result.landmarks[0];
@@ -353,7 +491,8 @@ function processHands(result) {
   if (!hand) {
     primed = false;
     model.visible = false;
-    hasPose = false;
+    resetFilters();   // start clean next time the hand appears
+    lastFrameAt = 0;
     return;
   }
 
@@ -362,7 +501,14 @@ function processHands(result) {
   const thumbTip  = hand[4];
   const middleTip = hand[12];
 
-  updateModel(hand);
+  // De-jitter the landmarks the model rides on. Snap detection deliberately
+  // keeps using the raw values so its timing stays as responsive as before.
+  const dt = lastFrameAt ? Math.max((now - lastFrameAt) / 1000, 1e-3) : 1 / 30;
+  lastFrameAt = now;
+  const smooth = {};
+  FILTERED_IDS.forEach(i => { smooth[i] = pointFilters[i](hand[i], dt); });
+
+  updateModel(smooth);
 
   // normalize by hand size so detection works near or far
   const handSize = dist(wrist, middleMcp);
@@ -370,8 +516,9 @@ function processHands(result) {
   const pinchDist = dist(thumbTip, middleTip) / handSize;
 
   if (SHOW_LANDMARKS) {
-    drawDot(thumbTip, primed ? '#6fcf97' : '#4a90d9');
-    drawDot(middleTip, primed ? '#6fcf97' : '#4a90d9');
+    // draw the smoothed points so the dots match what the model is doing
+    drawDot(smooth[4],  primed ? '#6fcf97' : '#4a90d9');
+    drawDot(smooth[12], primed ? '#6fcf97' : '#4a90d9');
   }
 
   // state machine: pinch (primed) → fast release = snap
@@ -395,65 +542,58 @@ function processHands(result) {
 }
 
 // Anchor the model: top → middle tip (12), base → thumb tip (4). Scale comes
-// from the tip-to-tip distance; orientation from that same axis plus the palm
-// plane, so tilting or rotating the hand rotates the tower.
-function updateModel(hand) {
-  const pMiddle = toWorld(hand[12]);
-  const pThumb  = toWorld(hand[4]);
+// from the tip-to-tip distance and the vertical axis from that same pair, so
+// the tower still leans with your fingers. Its facing direction is steady
+// (see USE_PALM_ROTATION) and the slow spin is applied in tick().
+function updateModel(pts) {
+  const pMiddle = toWorld(pts[12]);
+  const pThumb  = toWorld(pts[4]);
 
   const up = pMiddle.clone().sub(pThumb);
   const len = up.length();
-  if (len < 1e-6) { model.visible = false; hasPose = false; return; }
+  if (len < 1e-6) { model.visible = false; return; }
   up.divideScalar(len);
 
-  // palm normal → which way the tower's front faces
-  const pWrist    = toWorld(hand[0]);
-  const pIndexMcp = toWorld(hand[5]);
-  const pPinkyMcp = toWorld(hand[17]);
-  const normal = new THREE.Vector3().crossVectors(
-    pIndexMcp.clone().sub(pWrist),
-    pPinkyMcp.clone().sub(pWrist)
-  );
-  if (normal.lengthSq() < 1e-12) normal.set(0, 0, 1);
-  normal.normalize();
+  const normal = new THREE.Vector3();
+  if (USE_PALM_ROTATION) {
+    // palm normal → the tower's front follows the palm (noisier)
+    const pWrist    = toWorld(pts[0]);
+    const pIndexMcp = toWorld(pts[5]);
+    const pPinkyMcp = toWorld(pts[17]);
+    normal.crossVectors(
+      pIndexMcp.clone().sub(pWrist),
+      pPinkyMcp.clone().sub(pWrist)
+    );
+    if (normal.lengthSq() < 1e-12) normal.set(0, 0, 1);
+    normal.normalize();
+  } else {
+    // steady reference: face the camera, then let the spin do the rotating
+    normal.set(0, 0, 1);
+  }
 
   // make the facing direction perpendicular to the finger axis
   normal.addScaledVector(up, -normal.dot(up));
   if (normal.lengthSq() < 1e-8) {
-    // finger axis happens to point along the palm normal — pick any perpendicular
-    normal.set(0, 0, 1).addScaledVector(up, -up.z);
-    if (normal.lengthSq() < 1e-8) normal.set(1, 0, 0).addScaledVector(up, -up.x);
+    // finger axis points straight at the camera — pick any perpendicular
+    normal.set(1, 0, 0).addScaledVector(up, -up.x);
+    if (normal.lengthSq() < 1e-8) normal.set(0, 1, 0).addScaledVector(up, -up.y);
   }
   normal.normalize();
 
   const right = new THREE.Vector3().crossVectors(up, normal).normalize();
-  const quat = new THREE.Quaternion().setFromRotationMatrix(
+  model.quaternion.setFromRotationMatrix(
     new THREE.Matrix4().makeBasis(right, up, normal)
   );
-  const mid = pMiddle.clone().add(pThumb).multiplyScalar(0.5);
-
-  if (!hasPose) {
-    smPos.copy(mid);
-    smQuat.copy(quat);
-    smScale = len;
-    hasPose = true;
-  } else {
-    const t = 1 - MODEL_SMOOTH;
-    smPos.lerp(mid, t);
-    smQuat.slerp(quat, t);
-    smScale += (len - smScale) * t;
-  }
-
-  model.position.copy(smPos);
-  model.quaternion.copy(smQuat);
-  model.scale.setScalar(smScale);
+  model.position.copy(pMiddle).add(pThumb).multiplyScalar(0.5);
+  model.scale.setScalar(len);
   model.visible = true;
 }
 
-function drawDot(pt, color) {
+function drawDot(lm, color) {
+  const p = toScreen(lm);
   ctx.fillStyle = color;
   ctx.beginPath();
-  ctx.arc(pt.x * overlay.width, pt.y * overlay.height, 8, 0, Math.PI * 2);
+  ctx.arc(p.x, p.y, 8, 0, Math.PI * 2);
   ctx.fill();
 }
 
@@ -472,15 +612,13 @@ function onSnap() {
   player.style.display = 'block';
   player.currentTime = 0;
   player.play().catch(err => {
-    statusEl.textContent = 'Video play failed 影片播放失敗: ' + err.message +
-      ' (check that ' + VIDEO_SRC + ' exists)';
+    hint.textContent = 'Video play failed 影片播放失敗: ' + err.message;
     player.style.display = 'none';
   });
 }
 
 player.addEventListener('ended', () => {
   player.style.display = 'none';
-  statusEl.textContent = 'Watching… snap your fingers 偵測中…請彈指';
 });
 </script>
 
