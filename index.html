@@ -4,6 +4,14 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Snap to Play</title>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -66,6 +74,15 @@
     transform: scaleX(-1);
     pointer-events: none;
   }
+  /* 3D layer — same box, same mirror, so it lines up with the video */
+  #three {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    transform: scaleX(-1);
+    pointer-events: none;
+  }
 
   #snapFlash {
     font-size: 15px;
@@ -95,6 +112,7 @@
   <div id="camWrap">
     <video id="cam" autoplay playsinline muted></video>
     <canvas id="overlay"></canvas>
+    <canvas id="three"></canvas>
   </div>
   <div id="snapFlash">Snap detected!</div>
 </div>
@@ -114,10 +132,30 @@ const SNAP_WINDOW_MS  = 400;   // release must happen within this time after pri
 const COOLDOWN_MS     = 1500;  // ignore further snaps for this long after triggering
 const RESTART_ON_SNAP = true;  // snap while video playing → restart from beginning
 const SHOW_LANDMARKS  = true;  // draw thumb/middle fingertip dots on the preview
+
+/* ---- 3D model (Eiffel tower) -------------------------------
+   The model is normalized to height 1 with its top at +0.5Y and
+   its base at -0.5Y, so the spire sticks to the MIDDLE fingertip
+   and the base sticks to the THUMB tip. Rotation and scale both
+   follow those two points.
+   ------------------------------------------------------------ */
+const MODEL_DIR       = 'tower/';
+const MODEL_OBJ       = '10067_Eiffel_Tower_v1_max2010_it1.obj';
+const MODEL_MTL       = '10067_Eiffel_Tower_v1_max2010_it1.mtl';
+const MODEL_UP_AXIS   = 'z';   // source model is Z-up (3ds Max export)
+const MODEL_SPIN      = 0;     // extra spin around the tower's own axis (radians)
+const MODEL_BRIGHTEN  = true;  // the .mtl ships Kd 0.59, which dims the texture;
+                               // true = show the texture at full brightness
+const MODEL_SMOOTH    = 0.45;  // 0 = raw/jittery, 0.9 = very smooth but laggy
+const CAM_DIST        = 5;     // virtual camera distance
+const CAM_FOV         = 50;    // virtual camera field of view (deg)
 /* ============================================================ */
 
 import { HandLandmarker, FilesetResolver } from
   'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs';
+import * as THREE from 'three';
+import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+import { MTLLoader } from 'three/addons/loaders/MTLLoader.js';
 
 const startBtn  = document.getElementById('startBtn');
 const statusEl  = document.getElementById('status');
@@ -125,6 +163,7 @@ const camWrap   = document.getElementById('camWrap');
 const cam       = document.getElementById('cam');
 const overlay   = document.getElementById('overlay');
 const ctx       = overlay.getContext('2d');
+const threeCv   = document.getElementById('three');
 const snapFlash = document.getElementById('snapFlash');
 const player    = document.getElementById('player');
 
@@ -138,6 +177,107 @@ let lastVideoTime = -1;
 let primed = false;
 let primedAt = 0;
 let lastSnapAt = 0;
+
+/* ---------------- three.js scene ---------------- */
+const renderer = new THREE.WebGLRenderer({ canvas: threeCv, alpha: true, antialias: true });
+const scene    = new THREE.Scene();
+const camera3d = new THREE.PerspectiveCamera(CAM_FOV, 1, 0.1, 100);
+camera3d.position.set(0, 0, CAM_DIST);
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.9));
+const keyLight = new THREE.DirectionalLight(0xffffff, 1.4);
+keyLight.position.set(1, 1.5, 2);
+scene.add(keyLight);
+const fillLight = new THREE.DirectionalLight(0xffffff, 0.5);
+fillLight.position.set(-1, -0.5, -1);
+scene.add(fillLight);
+
+// visible world size on the z=0 plane — recomputed whenever the canvas resizes
+let viewH = 1, viewW = 1;
+
+// The wrapper is what gets positioned/rotated/scaled by the hand. Its local
+// +0.5Y is the middle fingertip and -0.5Y is the thumb tip; the loaded model is
+// normalized into exactly that range, so any model drops in unchanged.
+const model = new THREE.Group();
+model.visible = false;
+scene.add(model);
+
+// Rotate a Z-up (or X-up) source model so its height runs along +Y, then
+// scale it to height 1 and centre it so it spans -0.5Y .. +0.5Y.
+function normalizeModel(obj) {
+  if (MODEL_UP_AXIS === 'z') obj.rotation.x = -Math.PI / 2;
+  else if (MODEL_UP_AXIS === 'x') obj.rotation.z = Math.PI / 2;
+  obj.updateMatrixWorld(true);
+
+  const box = new THREE.Box3().setFromObject(obj);
+  const size = new THREE.Vector3(); box.getSize(size);
+  const center = new THREE.Vector3(); box.getCenter(center);
+  if (size.y < 1e-9) return obj;
+
+  const s = 1 / size.y;
+  obj.scale.setScalar(s);
+  obj.position.set(-center.x * s, -center.y * s, -center.z * s);
+
+  // spin around the tower's own vertical axis
+  const spinner = new THREE.Group();
+  spinner.add(obj);
+  spinner.rotation.y = MODEL_SPIN;
+  return spinner;
+}
+
+async function loadModel(onProgress) {
+  const materials = await new MTLLoader()
+    .setPath(MODEL_DIR)
+    .loadAsync(MODEL_MTL);
+  materials.preload();
+
+  const obj = await new OBJLoader()
+    .setMaterials(materials)
+    .setPath(MODEL_DIR)
+    .loadAsync(MODEL_OBJ, onProgress);
+
+  // thin lattice geometry reads better lit from both sides
+  obj.traverse(child => {
+    if (!child.isMesh) return;
+    const mats = Array.isArray(child.material) ? child.material : [child.material];
+    mats.forEach(m => {
+      if (!m) return;
+      m.side = THREE.DoubleSide;
+      if (m.map) m.map.colorSpace = THREE.SRGBColorSpace;
+      if (MODEL_BRIGHTEN && m.color) m.color.setHex(0xffffff);
+    });
+  });
+
+  model.add(normalizeModel(obj));
+}
+
+function sizeRenderer() {
+  const w = cam.videoWidth, h = cam.videoHeight;
+  if (!w || !h) return;
+  // Match the video's intrinsic size; CSS stretches both canvases to the
+  // same box, so landmark coords map straight onto the 3D view.
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setSize(w, h, false);
+  camera3d.aspect = w / h;
+  camera3d.updateProjectionMatrix();
+  viewH = 2 * CAM_DIST * Math.tan(THREE.MathUtils.degToRad(CAM_FOV) / 2);
+  viewW = viewH * camera3d.aspect;
+}
+
+// normalized landmark → world position on/near the z=0 plane
+function toWorld(lm) {
+  return new THREE.Vector3(
+    (lm.x - 0.5) * viewW,
+    -(lm.y - 0.5) * viewH,
+    -(lm.z || 0) * viewW   // MediaPipe z is negative toward the camera
+  );
+}
+
+// smoothed transform state
+const smPos  = new THREE.Vector3();
+const smQuat = new THREE.Quaternion();
+let   smScale = 0;
+let   hasPose = false;
 
 startBtn.addEventListener('click', async () => {
   startBtn.disabled = true;
@@ -156,6 +296,14 @@ startBtn.addEventListener('click', async () => {
       numHands: 1
     });
 
+    statusEl.textContent = 'Loading tower model… 載入鐵塔模型中…';
+    await loadModel(e => {
+      if (e && e.lengthComputable) {
+        const pct = Math.round((e.loaded / e.total) * 100);
+        statusEl.textContent = `Loading tower model… 載入鐵塔模型中… ${pct}%`;
+      }
+    });
+
     statusEl.textContent = 'Requesting camera… 請求相機權限…';
     const stream = await navigator.mediaDevices.getUserMedia({
       video: { width: 640, height: 480, facingMode: 'user' }
@@ -166,6 +314,7 @@ startBtn.addEventListener('click', async () => {
 
     overlay.width = cam.videoWidth;
     overlay.height = cam.videoHeight;
+    sizeRenderer();
 
     startBtn.style.display = 'none';
     camWrap.style.display = 'block';
@@ -191,6 +340,7 @@ function tick() {
     const result = landmarker.detectForVideo(cam, performance.now());
     processHands(result);
   }
+  renderer.render(scene, camera3d);
   requestAnimationFrame(tick);
 }
 
@@ -202,6 +352,8 @@ function processHands(result) {
 
   if (!hand) {
     primed = false;
+    model.visible = false;
+    hasPose = false;
     return;
   }
 
@@ -209,6 +361,8 @@ function processHands(result) {
   const middleMcp = hand[9];
   const thumbTip  = hand[4];
   const middleTip = hand[12];
+
+  updateModel(hand);
 
   // normalize by hand size so detection works near or far
   const handSize = dist(wrist, middleMcp);
@@ -238,6 +392,62 @@ function processHands(result) {
       primed = false;
     }
   }
+}
+
+// Anchor the model: top → middle tip (12), base → thumb tip (4). Scale comes
+// from the tip-to-tip distance; orientation from that same axis plus the palm
+// plane, so tilting or rotating the hand rotates the tower.
+function updateModel(hand) {
+  const pMiddle = toWorld(hand[12]);
+  const pThumb  = toWorld(hand[4]);
+
+  const up = pMiddle.clone().sub(pThumb);
+  const len = up.length();
+  if (len < 1e-6) { model.visible = false; hasPose = false; return; }
+  up.divideScalar(len);
+
+  // palm normal → which way the tower's front faces
+  const pWrist    = toWorld(hand[0]);
+  const pIndexMcp = toWorld(hand[5]);
+  const pPinkyMcp = toWorld(hand[17]);
+  const normal = new THREE.Vector3().crossVectors(
+    pIndexMcp.clone().sub(pWrist),
+    pPinkyMcp.clone().sub(pWrist)
+  );
+  if (normal.lengthSq() < 1e-12) normal.set(0, 0, 1);
+  normal.normalize();
+
+  // make the facing direction perpendicular to the finger axis
+  normal.addScaledVector(up, -normal.dot(up));
+  if (normal.lengthSq() < 1e-8) {
+    // finger axis happens to point along the palm normal — pick any perpendicular
+    normal.set(0, 0, 1).addScaledVector(up, -up.z);
+    if (normal.lengthSq() < 1e-8) normal.set(1, 0, 0).addScaledVector(up, -up.x);
+  }
+  normal.normalize();
+
+  const right = new THREE.Vector3().crossVectors(up, normal).normalize();
+  const quat = new THREE.Quaternion().setFromRotationMatrix(
+    new THREE.Matrix4().makeBasis(right, up, normal)
+  );
+  const mid = pMiddle.clone().add(pThumb).multiplyScalar(0.5);
+
+  if (!hasPose) {
+    smPos.copy(mid);
+    smQuat.copy(quat);
+    smScale = len;
+    hasPose = true;
+  } else {
+    const t = 1 - MODEL_SMOOTH;
+    smPos.lerp(mid, t);
+    smQuat.slerp(quat, t);
+    smScale += (len - smScale) * t;
+  }
+
+  model.position.copy(smPos);
+  model.quaternion.copy(smQuat);
+  model.scale.setScalar(smScale);
+  model.visible = true;
 }
 
 function drawDot(pt, color) {
