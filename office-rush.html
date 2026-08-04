@@ -239,6 +239,20 @@
   .libttl{flex:1;text-align:center;font-size:clamp(7px,2.2vw,9px);letter-spacing:.24em;
     text-transform:uppercase;color:var(--cy-mid);white-space:nowrap}
 
+  #muteBtn{
+    flex:0 0 auto;width:44px;height:40px;cursor:pointer;position:relative;
+    padding:2px;border-radius:6px;display:flex;align-items:center;justify-content:center;
+    background:linear-gradient(160deg,#3f9cc4,#08202c 45%,#2f88b8);
+    box-shadow:0 0 12px rgba(95,211,255,.22);border:0}
+  #muteBtn::before{content:"";position:absolute;inset:2px;border-radius:4px;z-index:0;
+    background:linear-gradient(180deg,#0e2f44,#04111b);
+    box-shadow:inset 0 1px 0 rgba(234,251,255,.2), inset 0 0 14px rgba(0,0,0,.85)}
+  #muteBtn svg{position:relative;z-index:1;width:17px;height:17px;display:block;color:var(--cy)}
+  #muteBtn .xx{display:none}
+  #muteBtn.off svg{color:var(--cy-deep)}
+  #muteBtn.off .wv{display:none} #muteBtn.off .xx{display:block}
+  #muteBtn:active{transform:scale(.9)}
+
   /* ============ console row ============ */
   #make{flex:0 0 auto;display:flex;padding-bottom:15px}
   #binBtn,#phone{
@@ -466,6 +480,7 @@
           </svg>
         </div>
         <span class="libttl">Asset Library</span>
+        <button id="muteBtn" title="Sound on / off"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9v6h4l5 4V5L8 9H4z" fill="currentColor"/><g class="wv"><path d="M16.5 8.5a5 5 0 0 1 0 7"/><path d="M19 6a8.5 8.5 0 0 1 0 12"/></g><g class="xx"><path d="M17 9.5l5 5M22 9.5l-5 5"/></g></svg></button>
         <div id="phone" title="Hotline">
           <svg viewBox="0 0 24 24" fill="currentColor">
             <path d="M6.6 10.8a15 15 0 0 0 6.6 6.6l2.2-2.2a1.2 1.2 0 0 1 1.2-.3 13 13 0 0 0 4 .7
@@ -516,6 +531,77 @@
 (function(){
 "use strict";
 const $=id=>document.getElementById(id);
+/* ---------- SFX: tiny Web Audio synth, no asset files ---------- */
+const SFX=(function(){
+  let ctx=null,master=null,on=true;
+  try{ on = localStorage.getItem('sfx_off')!=='1'; }catch(e){}
+  function ac(){
+    if(!ctx){
+      const AC=window.AudioContext||window.webkitAudioContext; if(!AC) return null;
+      ctx=new AC();
+      master=ctx.createGain(); master.gain.value=.45; master.connect(ctx.destination);
+    }
+    if(ctx.state==='suspended') ctx.resume();
+    return ctx;
+  }
+  function beep(o){
+    if(!on) return; const c=ac(); if(!c) return;
+    const {f=440,f2=0,type='sine',dur=.18,peak=.25,at=.004,when=0}=o;
+    const t=c.currentTime+when;
+    const osc=c.createOscillator(), g=c.createGain();
+    osc.type=type; osc.frequency.setValueAtTime(f,t);
+    if(f2) osc.frequency.exponentialRampToValueAtTime(Math.max(1,f2),t+dur);
+    g.gain.setValueAtTime(.0001,t);
+    g.gain.exponentialRampToValueAtTime(peak,t+at);
+    g.gain.exponentialRampToValueAtTime(.0001,t+dur);
+    osc.connect(g); g.connect(master); osc.start(t); osc.stop(t+dur+.02);
+  }
+  function noise(o){
+    if(!on) return; const c=ac(); if(!c) return;
+    const {dur=.2,peak=.2,hp=600,lp=6000,when=0}=o;
+    const t=c.currentTime+when, n=Math.max(1,Math.floor(c.sampleRate*dur));
+    const buf=c.createBuffer(1,n,c.sampleRate), d=buf.getChannelData(0);
+    for(let i=0;i<n;i++) d[i]=(Math.random()*2-1)*(1-i/n);
+    const src=c.createBufferSource(); src.buffer=buf;
+    const bp=c.createBiquadFilter(); bp.type='bandpass';
+    bp.frequency.value=(hp+lp)/2; bp.Q.value=.7;
+    const g=c.createGain();
+    g.gain.setValueAtTime(peak,t); g.gain.exponentialRampToValueAtTime(.0001,t+dur);
+    src.connect(bp); bp.connect(g); g.connect(master); src.start(t); src.stop(t+dur);
+  }
+  // pentatonic ladder — each combo step lands a rung higher (Tower-of-Saviors feel)
+  const LADDER=[0,2,4,7,9,12,14,16,19,21,24];
+  const rung=n=>523.25*Math.pow(2,LADDER[Math.max(0,Math.min(n-1,LADDER.length-1))]/12);
+  return {
+    get enabled(){return on;},
+    unlock(){ ac(); },
+    toggle(){ on=!on; try{localStorage.setItem('sfx_off',on?'0':'1');}catch(e){}
+      if(on){ ac(); beep({f:660,f2:880,type:'triangle',dur:.07,peak:.14}); } return on; },
+    ui(){ beep({f:660,f2:880,type:'triangle',dur:.07,peak:.14}); },
+    pick(){ beep({f:760,f2:1040,type:'sine',dur:.08,peak:.16}); },
+    tick(i){ beep({f:480+((i|0)%8)*45,type:'sine',dur:.05,peak:.06}); },
+    place(){ beep({f:200,f2:120,type:'triangle',dur:.13,peak:.26});
+             noise({dur:.09,peak:.09,hp:200,lp:1800}); },
+    invalid(){ beep({f:150,f2:110,type:'square',dur:.14,peak:.11}); },
+    link(){ beep({f:880,f2:1320,type:'sine',dur:.16,peak:.18}); },
+    clear(){ noise({dur:.28,peak:.15,hp:1200,lp:9000});
+             beep({f:1046,type:'sine',dur:.22,peak:.15});
+             beep({f:1568,type:'sine',dur:.26,peak:.09,when:.04}); },
+    combo(n){ const f=rung(n);
+      beep({f,type:'sine',dur:.38,peak:.25});
+      beep({f:f*2,type:'sine',dur:.3,peak:.11,when:.01});
+      beep({f:f*3,type:'sine',dur:.2,peak:.05,when:.02});
+      noise({dur:.2,peak:.08,hp:2000,lp:11000}); },
+    win(){ [0,4,7,12].forEach((s,i)=>{ const f=523.25*Math.pow(2,s/12);
+        beep({f,type:'sine',dur:.5,peak:.21,when:i*.11});
+        beep({f:f*2,type:'sine',dur:.4,peak:.09,when:i*.11+.01}); });
+      noise({dur:.6,peak:.09,hp:1500,lp:10000,when:.1}); },
+    lose(){ [392,330,262,196].forEach((f,i)=>
+      beep({f,type:'triangle',dur:.4,peak:.19,when:i*.14})); }
+  };
+})();
+document.addEventListener('pointerdown',()=>SFX.unlock(),{once:true});
+
 
 /* ---------- engagement assets (order + numbers match the reference) ---------- */
 const ITEMS={
@@ -611,7 +697,7 @@ function spawn(i){const t=makeTarget();S.customers[i]={face:hcp(rint(4)),target:
 function addItem(k){
   if(S.phase!=="play"||S.zipped)return;
   if(S.build.length>=6){bump();return;}
-  S.build.push(k); renderPack();
+  S.build.push(k); renderPack(); SFX.pick();
   if(navigator.vibrate)navigator.vibrate(6);
 }
 function removeAt(idx){if(S.phase!=="play"||S.zipped)return;S.build.splice(idx,1);renderPack();}
@@ -624,11 +710,12 @@ function deliverTo(i){
     const gain=Math.round((40*c.target.length+remSec*6)*Math.min(S.combo,5));
     const coin=10*c.target.length;
     S.score+=gain; S.coins+=coin; S.served++;
+    SFX.clear(); SFX.combo(S.combo);
     toast(`Signal delivered +${gain} · ${coin} pts${S.combo>2?" · chain x"+S.combo:""}`);
     flash("good"); if(navigator.vibrate)navigator.vibrate([12,20,12]);
     S.build=[]; S.zip=0; S.zipped=false; S.customers[i]=null; spawn(i); renderAll();
   } else {
-    toast("Signal mismatch"); flash("bad"); S.combo=0;
+    SFX.invalid(); toast("Signal mismatch"); flash("bad"); S.combo=0;
     if(navigator.vibrate)navigator.vibrate(90);
     const el=document.querySelector(`.customer[data-i="${i}"] .bubble`);
     if(el)el.animate([{transform:'translateX(0)'},{transform:'translateX(-7px)'},{transform:'translateX(7px)'},{transform:'translateX(0)'}],{duration:200});
@@ -637,7 +724,7 @@ function deliverTo(i){
 }
 function customerLeaves(i){
   S.customers[i]=null;S.combo=0;S.lives--;
-  toast("HCP disconnected");flash("bad");if(navigator.vibrate)navigator.vibrate(140);
+  SFX.lose(); toast("HCP disconnected");flash("bad");if(navigator.vibrate)navigator.vibrate(140);
   if(S.lives<=0){gameOver();return;}
   spawn(i);renderAll();
 }
@@ -708,7 +795,7 @@ $("zipPull").addEventListener("pointerdown",e=>{
   function mv(ev){S.zip=Math.max(0,Math.min(1,(ev.clientX-track.left)/w));S.zipped=false;renderZip();}
   function up(){document.removeEventListener("pointermove",mv);document.removeEventListener("pointerup",up);
     S.zipped=S.zip>=.8; S.zip=S.zipped?1:0; renderPack();
-    if(S.zipped)toast("Signal locked — deliver it");}
+    if(S.zipped){ SFX.link(); toast("Signal locked — deliver it"); }}
   document.addEventListener("pointermove",mv,{passive:false});
   document.addEventListener("pointerup",up);
 });
@@ -753,9 +840,13 @@ function loop(t){
 }
 
 // ---------- wire ----------
-$("binBtn").onclick=emptyPack;
+$("binBtn").onclick=()=>{ SFX.ui(); emptyPack(); };
+const muteBtn=$("muteBtn");
+muteBtn.classList.toggle('off',!SFX.enabled);
+muteBtn.onclick=()=>muteBtn.classList.toggle('off',!SFX.toggle());
 $("phone").onclick=()=>toast("Hotline: no escalations");
-$("startBtn").onclick=newGame;$("restartBtn").onclick=newGame;
+$("startBtn").onclick=()=>{SFX.ui();newGame();};
+$("restartBtn").onclick=()=>{SFX.ui();newGame();};
 window.addEventListener("resize",()=>{ if(S) renderZip(); });
 requestAnimationFrame(loop);
 })();

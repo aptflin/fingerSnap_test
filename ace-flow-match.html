@@ -156,6 +156,16 @@
     font-variant-numeric:tabular-nums;text-shadow:0 0 14px rgba(226,199,128,.55)}
   .stat.best .val{color:#c4e8ff;text-shadow:0 0 14px rgba(124,196,255,.6)}
 
+  .mute{flex:0 0 auto;width:42px;padding:2px;border-radius:var(--radius);border:0;cursor:pointer;
+    background:linear-gradient(180deg,#6b4f1c,#2a1e0a 46%,#5c4318);
+    box-shadow:0 0 14px rgba(201,164,76,.2)}
+  .mute .face{display:flex;align-items:center;justify-content:center;padding:9px 0;border-radius:2px;
+    background:linear-gradient(180deg,#12203a,#060d18);color:var(--gold)}
+  .mute svg{width:16px;height:16px;display:block}
+  .mute .xx{display:none}
+  .mute.off .face{color:var(--gold-deep)}
+  .mute.off .wv{display:none} .mute.off .xx{display:block}
+
   /* ============ board panel ============ */
   .panel{
     flex:0 1 auto;min-height:0;position:relative;z-index:4;
@@ -447,6 +457,7 @@
     <div class="stat best"><div class="face">
       <div class="label">Best Flow</div><div class="val" id="best">0</div>
     </div></div>
+    <button class="mute" id="muteBtn" title="Sound on / off"><span class="face"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9v6h4l5 4V5L8 9H4z" fill="currentColor"/><g class="wv"><path d="M16.5 8.5a5 5 0 0 1 0 7"/><path d="M19 6a8.5 8.5 0 0 1 0 12"/></g><g class="xx"><path d="M17 9.5l5 5M22 9.5l-5 5"/></g></svg></span></button>
   </div>
 
   <div class="panel">
@@ -490,6 +501,77 @@
 (function(){
   "use strict";
   const N = 6;
+/* ---------- SFX: tiny Web Audio synth, no asset files ---------- */
+const SFX=(function(){
+  let ctx=null,master=null,on=true;
+  try{ on = localStorage.getItem('sfx_off')!=='1'; }catch(e){}
+  function ac(){
+    if(!ctx){
+      const AC=window.AudioContext||window.webkitAudioContext; if(!AC) return null;
+      ctx=new AC();
+      master=ctx.createGain(); master.gain.value=.45; master.connect(ctx.destination);
+    }
+    if(ctx.state==='suspended') ctx.resume();
+    return ctx;
+  }
+  function beep(o){
+    if(!on) return; const c=ac(); if(!c) return;
+    const {f=440,f2=0,type='sine',dur=.18,peak=.25,at=.004,when=0}=o;
+    const t=c.currentTime+when;
+    const osc=c.createOscillator(), g=c.createGain();
+    osc.type=type; osc.frequency.setValueAtTime(f,t);
+    if(f2) osc.frequency.exponentialRampToValueAtTime(Math.max(1,f2),t+dur);
+    g.gain.setValueAtTime(.0001,t);
+    g.gain.exponentialRampToValueAtTime(peak,t+at);
+    g.gain.exponentialRampToValueAtTime(.0001,t+dur);
+    osc.connect(g); g.connect(master); osc.start(t); osc.stop(t+dur+.02);
+  }
+  function noise(o){
+    if(!on) return; const c=ac(); if(!c) return;
+    const {dur=.2,peak=.2,hp=600,lp=6000,when=0}=o;
+    const t=c.currentTime+when, n=Math.max(1,Math.floor(c.sampleRate*dur));
+    const buf=c.createBuffer(1,n,c.sampleRate), d=buf.getChannelData(0);
+    for(let i=0;i<n;i++) d[i]=(Math.random()*2-1)*(1-i/n);
+    const src=c.createBufferSource(); src.buffer=buf;
+    const bp=c.createBiquadFilter(); bp.type='bandpass';
+    bp.frequency.value=(hp+lp)/2; bp.Q.value=.7;
+    const g=c.createGain();
+    g.gain.setValueAtTime(peak,t); g.gain.exponentialRampToValueAtTime(.0001,t+dur);
+    src.connect(bp); bp.connect(g); g.connect(master); src.start(t); src.stop(t+dur);
+  }
+  // pentatonic ladder — each combo step lands a rung higher (Tower-of-Saviors feel)
+  const LADDER=[0,2,4,7,9,12,14,16,19,21,24];
+  const rung=n=>523.25*Math.pow(2,LADDER[Math.max(0,Math.min(n-1,LADDER.length-1))]/12);
+  return {
+    get enabled(){return on;},
+    unlock(){ ac(); },
+    toggle(){ on=!on; try{localStorage.setItem('sfx_off',on?'0':'1');}catch(e){}
+      if(on){ ac(); beep({f:660,f2:880,type:'triangle',dur:.07,peak:.14}); } return on; },
+    ui(){ beep({f:660,f2:880,type:'triangle',dur:.07,peak:.14}); },
+    pick(){ beep({f:760,f2:1040,type:'sine',dur:.08,peak:.16}); },
+    tick(i){ beep({f:480+((i|0)%8)*45,type:'sine',dur:.05,peak:.06}); },
+    place(){ beep({f:200,f2:120,type:'triangle',dur:.13,peak:.26});
+             noise({dur:.09,peak:.09,hp:200,lp:1800}); },
+    invalid(){ beep({f:150,f2:110,type:'square',dur:.14,peak:.11}); },
+    link(){ beep({f:880,f2:1320,type:'sine',dur:.16,peak:.18}); },
+    clear(){ noise({dur:.28,peak:.15,hp:1200,lp:9000});
+             beep({f:1046,type:'sine',dur:.22,peak:.15});
+             beep({f:1568,type:'sine',dur:.26,peak:.09,when:.04}); },
+    combo(n){ const f=rung(n);
+      beep({f,type:'sine',dur:.38,peak:.25});
+      beep({f:f*2,type:'sine',dur:.3,peak:.11,when:.01});
+      beep({f:f*3,type:'sine',dur:.2,peak:.05,when:.02});
+      noise({dur:.2,peak:.08,hp:2000,lp:11000}); },
+    win(){ [0,4,7,12].forEach((s,i)=>{ const f=523.25*Math.pow(2,s/12);
+        beep({f,type:'sine',dur:.5,peak:.21,when:i*.11});
+        beep({f:f*2,type:'sine',dur:.4,peak:.09,when:i*.11+.01}); });
+      noise({dur:.6,peak:.09,hp:1500,lp:10000,when:.1}); },
+    lose(){ [392,330,262,196].forEach((f,i)=>
+      beep({f,type:'triangle',dur:.4,peak:.19,when:i*.14})); }
+  };
+})();
+document.addEventListener('pointerdown',()=>SFX.unlock(),{once:true});
+
   const COLORS = ['c1','c2','c3','c4'];
 
   const SHAPES = [
@@ -669,6 +751,7 @@
       burstAt(r.left+r.width/2, r.top+r.height/2, RGB[grid[i]]||[247,230,180], lines>=2?12:8);
     });
     shake();
+    SFX.clear(); SFX.combo(lines);
     flashScreen(RGB[grid[idxs[0]]]||[247,230,180]);
     if(lines>=2){
       const b=boardEl.getBoundingClientRect();
@@ -807,6 +890,7 @@
     const g=pieceGridEl(piece,scale);
     dragEl.appendChild(g);
     dragEl.style.display='block';
+    SFX.pick();
     dragging={idx,piece,scale,offX:piece.cols*scale/2,offY:piece.rows*scale+scale*0.9};
     moveDrag(e);
     window.addEventListener('pointermove',moveDrag);
@@ -845,7 +929,8 @@
     if(!dragging) return;
     const {r0,c0}=currentTarget(e);
     const d=dragging;dragging=null;
-    if(canPlaceAt(d.piece,r0,c0)) place(d.piece,d.idx,r0,c0);
+    if(canPlaceAt(d.piece,r0,c0)){ SFX.place(); place(d.piece,d.idx,r0,c0); }
+    else SFX.invalid();
   }
   window.addEventListener('pointercancel',endDrag);
 
@@ -859,6 +944,7 @@
     refillTray();
   }
   function endGame(){
+    SFX.lose();
     const go=document.getElementById('gameover');
     document.getElementById('finalScore').textContent=score;
     document.getElementById('finalBest').textContent='Best Flow '+best;
@@ -872,9 +958,13 @@
   }
 
   document.getElementById('restartBtn').addEventListener('click',()=>{
+    SFX.ui();
     document.getElementById('gameover').classList.add('hidden');
     reset();
   });
+  const muteBtn=document.getElementById('muteBtn');
+  muteBtn.classList.toggle('off',!SFX.enabled);
+  muteBtn.onclick=()=>muteBtn.classList.toggle('off',!SFX.toggle());
 
   window.addEventListener('resize',()=>{ if(grid){sizeBoard();renderBoard();renderTray();} });
   if(window.ResizeObserver){
