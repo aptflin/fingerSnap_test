@@ -144,7 +144,7 @@
   /* ============ trial tabs ============ */
   .trials{display:flex;gap:calc(var(--u)*.8);flex:0 0 auto}
   .lvl{
-    flex:1;cursor:pointer;font-family:var(--serif);position:relative;
+    flex:1;font-family:var(--serif);position:relative;pointer-events:none;
     padding:2px;border-radius:3px;border:0;
     background:linear-gradient(180deg,#6b4f1c,#2a1e0a 45%,#5c4318);
     transition:.18s;
@@ -160,8 +160,6 @@
     font-weight:700;text-transform:uppercase;transition:.18s}
   .lvl span{font-size:clamp(5.5px,1.75vw,7px);letter-spacing:.14em;color:var(--gold-deep);
     text-transform:uppercase;transition:.18s}
-  .lvl:hover{background:linear-gradient(180deg,#8f6c26,#3a290e 45%,#7a5c24)}
-  .lvl:hover b{color:var(--gold)}
   .lvl[aria-selected="true"]{background:var(--metal);
     box-shadow:0 0 16px rgba(226,199,128,.45), 0 0 0 1px rgba(255,250,234,.35)}
   .lvl[aria-selected="true"] .face{
@@ -468,25 +466,6 @@
 
       <div class="legend" id="legend"></div>
 
-      <div class="ctrls">
-        <button class="act" id="undoBtn"><span class="face">
-          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-               stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M3 9h11a5 5 0 0 1 0 10H8"/><path d="M7 5 3 9l4 4"/>
-          </svg>Undo Last Path</span></button>
-        <span class="sep">✦</span>
-        <button class="act" id="resetBtn"><span class="face">
-          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-               stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M20.5 12a8.5 8.5 0 1 1-2.6-6.1"/><path d="M20.5 4v5h-5"/>
-          </svg>Reset Trial</span></button>
-      </div>
-
-      <div class="rule">Connect every node <em>·</em> Paths cannot cross</div>
-
-      <div class="sync" id="sync" data-state="wait"><span class="face">
-        <i class="dot"></i><span id="syncTxt">Journey Sync: Waiting</span>
-      </span></div>
     </div>
   </div>
 </div>
@@ -959,11 +938,6 @@ function update(){
   document.querySelectorAll('#legend .stone').forEach(el=>
     el.classList.toggle('done',pairComplete(+el.dataset.pi)));
 
-  const sync=document.getElementById('sync'), txt=document.getElementById('syncTxt');
-  if(solved){ sync.dataset.state='ready'; txt.textContent='Journey Sync: Veeva Ready'; }
-  else if(linked>0 || filled>pairs.length*2){ sync.dataset.state='sync'; txt.textContent='Journey Sync: Weaving'; }
-  else { sync.dataset.state='wait'; txt.textContent='Journey Sync: Waiting'; }
-
   if(solved && !solvedFired){ solvedFired=true; playVictory(); }
 }
 function buildLegend(){
@@ -987,10 +961,10 @@ function showCard(){
 /* ---------- wire up ---------- */
 const tabs=document.getElementById('levels');
 LEVELS.forEach((L,i)=>{
-  const b=document.createElement('button');
-  b.className='lvl'; b.setAttribute('role','tab');
+  // read-only stage indicator — advancing happens through the victory card
+  const b=document.createElement('div');
+  b.className='lvl'; b.setAttribute('role','presentation');
   b.innerHTML=`<span class="face"><b>${L.name}</b><span>${L.tag}</span></span>`;
-  b.onclick=()=>loadLevel(i);
   tabs.appendChild(b);
 });
 cv.addEventListener('pointerdown',pointerDown);
@@ -1013,11 +987,6 @@ setInterval(()=>{
   if(k!==fitKey){ fitKey=k; resize(); }
 },300);
 
-document.getElementById('resetBtn').onclick=()=>loadLevel(LI);
-document.getElementById('undoBtn').onclick=()=>{
-  for(let pi=pairs.length-1;pi>=0;pi--){ if(paths[pi].length>=1){ clearPath(pi); break; } }
-  update(); render();
-};
 document.getElementById('nextBtn').onclick=()=>{
   document.getElementById('veil').classList.remove('on');
   loadLevel(LI<LEVELS.length-1?LI+1:0);

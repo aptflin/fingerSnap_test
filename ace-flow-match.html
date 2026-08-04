@@ -329,6 +329,20 @@
   .hint{font-size:10px;color:var(--muted);margin-top:11px;max-width:350px;line-height:1.7}
   .hint b{color:var(--gold-br)}
 
+  /* ============ feedback fx ============ */
+  #fx{position:fixed;inset:0;width:100%;height:100%;pointer-events:none;z-index:70}
+  #flashlayer{position:fixed;inset:0;pointer-events:none;z-index:65;opacity:0}
+  #flashlayer.on{animation:fl .5s ease-out}
+  @keyframes fl{0%{opacity:1}100%{opacity:0}}
+  .shell.shake{animation:shake .45s cubic-bezier(.36,.07,.19,.97)}
+  @keyframes shake{
+    10%,90%{transform:translate(-1px,1px)}   20%,80%{transform:translate(3px,-2px)}
+    30%,50%,70%{transform:translate(-5px,2px)} 40%,60%{transform:translate(5px,-1px)}
+  }
+  /* tile landing pop — same "it responded" feel as the link feedback */
+  .gem.land{animation:land .3s cubic-bezier(.2,1.6,.4,1)}
+  @keyframes land{0%{transform:scale(.55);filter:brightness(1.9)}100%{transform:scale(1)}}
+
   @media (max-height:620px){ .eyebrow,.orn,.foot{display:none} .fil{display:none} }
   @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style>
@@ -456,27 +470,6 @@
 
   <div id="drag"></div>
 
-  <!-- INTRO -->
-  <div class="overlay" id="intro">
-    <div class="brandmark">The Spark Archive</div>
-    <h1 class="otitle">Content ID Finder</h1>
-    <p class="osub">Match content · audience · channel</p>
-    <div class="lorewrap"><div class="lore">
-      每一則內容都是一顆 <b>Spark</b>，只有送到對的受眾與通路才會發亮。<br><br>
-      把托盤裡的 Spark 組合拖進索引盤，當<b>一整條橫排或直排 6 格被填滿</b>（不分色系），
-      該條索引就會貫通並清空。一次清多條＝<b>COMBO</b>。
-    </div></div>
-    <div class="stones">
-      <div class="stone"><div class="dot gem k-c4"></div><div class="nm">Content</div></div>
-      <div class="stone"><div class="dot gem k-c3"></div><div class="nm">Audience</div></div>
-      <div class="stone"><div class="dot gem k-c1"></div><div class="nm">Channel</div></div>
-      <div class="stone"><div class="dot gem k-c2"></div><div class="nm">Engage</div></div>
-    </div>
-    <button class="btn" id="startBtn"><span>Begin Indexing</span></button>
-    <div class="hint">拖曳下方 3 組 Spark 到索引盤，三組用完才會補新的。<br>
-      填滿一整排即<b>清除</b>，一次清多排得到 <b>COMBO</b> 加成。</div>
-  </div>
-
   <!-- GAME OVER -->
   <div class="overlay hidden" id="gameover">
     <div class="brandmark">Archive Sealed</div>
@@ -485,11 +478,13 @@
     <div class="finalbest" id="finalBest">Best Flow 0</div>
     <p class="verdict" id="verdict"></p>
     <button class="btn" id="restartBtn"><span>Restart Flow</span></button>
-    <button class="btn ghost" id="loreBtn"><span>Back to briefing</span></button>
   </div>
 
 </div>
 </div>
+
+<canvas id="fx"></canvas>
+<div id="flashlayer"></div>
 
 <script>
 (function(){
@@ -514,6 +509,7 @@
   ];
 
   let grid, score, best, tray, dragging, cellPx, flow;
+  const RGB={c1:[70,170,245],c2:[60,205,110],c3:[240,160,48],c4:[168,96,248]};
   const boardEl = document.getElementById('board');
   const trayEl  = document.getElementById('tray');
   const dragEl  = document.getElementById('drag');
@@ -635,12 +631,17 @@
   }
 
   function place(piece,idx,r0,c0){
+    const landed=piece.cells.map(c=>(r0+c.r)*N+(c0+c.c));
     for(const c of piece.cells) grid[(r0+c.r)*N+(c0+c.c)]=c.color;
     piece.used=true;
     addScore(piece.cells.length);
     setFlow(flow-6);
     resolveClears();
     renderBoard();
+    // landing pop on the tiles just placed
+    if(!REDUCED) landed.forEach(i=>{
+      const d=cellDivs[i]; d.classList.remove('land'); void d.offsetWidth; d.classList.add('land');
+    });
     renderTray();
     if(tray.every(p=>p.used)) refillTray();
     if(!anyMoveLeft()) endGame();
@@ -662,6 +663,18 @@
     if(!clearCells.size) return;
 
     const idxs=[...clearCells];
+    // fire the burst while the colours are still on the board
+    idxs.forEach(i=>{
+      const r=cellDivs[i].getBoundingClientRect();
+      burstAt(r.left+r.width/2, r.top+r.height/2, RGB[grid[i]]||[247,230,180], lines>=2?12:8);
+    });
+    shake();
+    flashScreen(RGB[grid[idxs[0]]]||[247,230,180]);
+    if(lines>=2){
+      const b=boardEl.getBoundingClientRect();
+      shockAt(b.left+b.width/2, b.top+b.height/2);
+      rayT=0;
+    }
     idxs.forEach(i=>cellDivs[i].classList.add('clearing'));
     const cleared=idxs.length;
     setTimeout(()=>{
@@ -691,6 +704,96 @@
   function addScore(n){
     score+=n;scoreEl.textContent=score;
     if(score>best){best=score;bestEl.textContent=best;localStorage.setItem('aceflow_best',best);}
+  }
+
+  /* ---------- feedback fx: bursts, shake, flash, shockwave, rays, motes ---------- */
+  const fx=document.getElementById('fx'), fctx=fx.getContext('2d');
+  const shellEl=document.querySelector('.shell'), flashEl=document.getElementById('flashlayer');
+  const REDUCED=window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const parts=[], waves=[], motes=[];
+  let rayT=-1, fxLast=0, fxT=0;
+
+  function fxResize(){
+    fx.width=innerWidth*devicePixelRatio; fx.height=innerHeight*devicePixelRatio;
+    fx.style.width=innerWidth+'px'; fx.style.height=innerHeight+'px';
+    fctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);
+    motes.length=0;
+    const b=boardEl.getBoundingClientRect();
+    for(let i=0;i<16;i++) motes.push({
+      x:b.left+Math.random()*b.width, y:b.top+Math.random()*b.height,
+      r:Math.random()*1.4+.5, sp:Math.random()*10+4, ph:Math.random()*6.28});
+  }
+  function burstAt(x,y,rgb,count){
+    for(let i=0;i<count;i++){
+      const a=Math.random()*6.283, sp=(.4+Math.random()*1.7)*2.4;
+      parts.push({x,y,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp,
+        life:0,max:.45+Math.random()*.55,rgb,sz:1.4+Math.random()*2.6});
+    }
+  }
+  function shockAt(x,y){ waves.push({x,y,t:0}); }
+  function shake(){ if(REDUCED)return;
+    shellEl.classList.remove('shake'); void shellEl.offsetWidth; shellEl.classList.add('shake'); }
+  function flashScreen(rgb){
+    if(REDUCED)return;
+    flashEl.style.background=
+      `radial-gradient(circle, rgba(${rgb.join(',')},.34), transparent 62%)`;
+    flashEl.classList.remove('on'); void flashEl.offsetWidth; flashEl.classList.add('on');
+  }
+  function fxLoop(ts){
+    const dt=Math.min(.05,(ts-fxLast)/1000||0); fxLast=ts; fxT=ts/1000;
+    const W=innerWidth,H=innerHeight;
+    fctx.clearRect(0,0,W,H);
+
+    // ambient motes drifting over the board
+    const b=boardEl.getBoundingClientRect();
+    motes.forEach(m=>{
+      m.y-=m.sp*dt; if(m.y<b.top-4){ m.y=b.bottom+4; m.x=b.left+Math.random()*b.width; }
+      const a=.2+.28*Math.sin(fxT*1.5+m.ph);
+      fctx.fillStyle=`rgba(247,230,180,${a*.5})`;
+      fctx.beginPath(); fctx.arc(m.x+Math.sin(fxT*.6+m.ph)*4,m.y,m.r,0,6.283); fctx.fill();
+    });
+
+    fctx.save(); fctx.globalCompositeOperation='lighter';
+    // rays on a big combo
+    if(rayT>=0){
+      rayT+=dt;
+      const k=Math.min(1,rayT/1.4), fade=1-k;
+      const cx=b.left+b.width/2, cy=b.top+b.height/2;
+      fctx.save(); fctx.translate(cx,cy); fctx.rotate(rayT*.35);
+      for(let i=0;i<16;i++){
+        fctx.rotate(6.283/16);
+        const len=Math.max(W,H)*(.3+.45*k), wd=(i%2?6:14)*fade;
+        const g=fctx.createLinearGradient(0,0,len,0);
+        g.addColorStop(0,`rgba(255,246,214,${.45*fade})`);
+        g.addColorStop(1,'rgba(255,246,214,0)');
+        fctx.fillStyle=g;
+        fctx.beginPath(); fctx.moveTo(0,-wd); fctx.lineTo(len,-wd*.25);
+        fctx.lineTo(len,wd*.25); fctx.lineTo(0,wd); fctx.closePath(); fctx.fill();
+      }
+      fctx.restore();
+      if(rayT>1.5) rayT=-1;
+    }
+    // shockwave rings
+    for(let i=waves.length-1;i>=0;i--){
+      const w=waves[i]; w.t+=dt;
+      const a=Math.max(0,1-w.t/1.05);
+      if(a<=0){ waves.splice(i,1); continue; }
+      fctx.strokeStyle=`rgba(255,246,214,${a*.6})`; fctx.lineWidth=4*a+1;
+      fctx.beginPath(); fctx.arc(w.x,w.y,w.t*640,0,6.283); fctx.stroke();
+    }
+    // particles
+    for(let i=parts.length-1;i>=0;i--){
+      const p=parts[i]; p.life+=dt;
+      if(p.life>=p.max){ parts.splice(i,1); continue; }
+      p.x+=p.vx; p.y+=p.vy; p.vx*=.94; p.vy*=.94; p.vy+=.16;
+      const k=1-p.life/p.max;
+      fctx.globalAlpha=k; fctx.fillStyle=`rgb(${p.rgb.join(',')})`;
+      fctx.shadowColor=fctx.fillStyle; fctx.shadowBlur=9;
+      fctx.beginPath(); fctx.arc(p.x,p.y,p.sz*k+.4,0,6.283); fctx.fill();
+    }
+    fctx.globalAlpha=1; fctx.shadowBlur=0;
+    fctx.restore();
+    requestAnimationFrame(fxLoop);
   }
 
   function attachDrag(el,idx){
@@ -738,12 +841,13 @@
   function endDrag(e){
     window.removeEventListener('pointermove',moveDrag);
     dragEl.style.display='none';
+    clearGhost();                 // must run even if the drag was already torn down
     if(!dragging) return;
     const {r0,c0}=currentTarget(e);
     const d=dragging;dragging=null;
-    clearGhost();
     if(canPlaceAt(d.piece,r0,c0)) place(d.piece,d.idx,r0,c0);
   }
+  window.addEventListener('pointercancel',endDrag);
 
   function reset(){
     grid=new Array(N*N).fill(0);
@@ -767,17 +871,9 @@
     go.classList.remove('hidden');
   }
 
-  document.getElementById('startBtn').addEventListener('click',()=>{
-    document.getElementById('intro').classList.add('hidden');
-    reset();
-  });
   document.getElementById('restartBtn').addEventListener('click',()=>{
     document.getElementById('gameover').classList.add('hidden');
     reset();
-  });
-  document.getElementById('loreBtn').addEventListener('click',()=>{
-    document.getElementById('gameover').classList.add('hidden');
-    document.getElementById('intro').classList.remove('hidden');
   });
 
   window.addEventListener('resize',()=>{ if(grid){sizeBoard();renderBoard();renderTray();} });
@@ -792,6 +888,10 @@
   bestEl.textContent=best;
   buildBoard();
   sizeBoard();
+  reset();            // no intro — start indexing immediately
+  fxResize();
+  window.addEventListener('resize',fxResize);
+  requestAnimationFrame(fxLoop);
 })();
 </script>
 </body>
