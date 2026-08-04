@@ -111,7 +111,8 @@
     background: rgba(0, 0, 0, 0.55);
     border-radius: 4px;
     display: none;
-    white-space: nowrap;
+    max-width: calc(100vw - 32px);
+    text-align: center;
   }
   #snapFlash {
     position: fixed;
@@ -171,7 +172,7 @@ const RELEASE_OFF     = 0.75;  // distance above this after priming = snap relea
 const SNAP_WINDOW_MS  = 400;   // release must happen within this time after priming
 const COOLDOWN_MS     = 1500;  // ignore further snaps for this long after triggering
 const RESTART_ON_SNAP = true;  // snap while video playing → restart from beginning
-const SHOW_LANDMARKS  = true;  // draw thumb/middle fingertip dots on the camera view
+const SHOW_LANDMARKS  = false; // draw thumb/middle fingertip dots on the camera view
 
 /* ---- 3D model (Eiffel tower) -------------------------------
    The model is normalized to height 1 with its top at +0.5Y and
@@ -188,7 +189,7 @@ const CAM_DIST        = 5;     // virtual camera distance
 const CAM_FOV         = 50;    // virtual camera field of view (deg)
 
 // Slow self-rotation around the tower's own vertical axis.
-const MODEL_SPIN_SPEED  = 0.15; // radians/sec (~42 s per full turn)
+const MODEL_SPIN_SPEED  = 1;   // radians/sec
 
 // Where the tower's "front" points. The palm normal is derived from a cross
 // product of three landmarks, so it magnifies tracking noise and makes the
@@ -206,6 +207,103 @@ const FILTER_BETA       = 5;    // higher = less lag when your hand moves fast
 
 // Cap the render buffer on high-DPI phones so the GPU keeps up.
 const MAX_PIXEL_RATIO   = 2;
+
+/* ---- magic particles ---------------------------------------
+   A swirling column of glowing motes around the model, so it
+   reads as the hand channelling something into it. Lives in the
+   model's local space, so it follows position/scale for free.
+   ------------------------------------------------------------ */
+const PARTICLES_ON      = true;
+
+// Two populations, the way the reference images read: a dense haze of very
+// fine dust, plus a handful of much brighter glints with star flares.
+const PARTICLE_DUST_COUNT  = 2200;
+const PARTICLE_SPARK_COUNT = 90;
+const PARTICLE_DUST_SIZE   = 0.024;  // relative to the model's height
+const PARTICLE_SPARK_SIZE  = 0.075;
+
+// White / ice blue / violet, with a rare warm glint for contrast.
+const PARTICLE_PALETTE   = [0xffffff, 0x7fc4ff, 0xa070ff, 0xffc98a];
+const PARTICLE_PALETTE_W = [0.22,     0.34,     0.34,     0.10];
+
+// A shell rather than a filled cloud, so the silhouette edge reads brightest.
+const PARTICLE_SHELL_R     = 0.50;   // shell radius, model heights
+const PARTICLE_SHELL_THICK = 0.26;   // how far inside the shell they scatter
+const PARTICLE_SHELL_TALL  = 1.30;   // stretch it vertically to suit a tall model
+
+const PARTICLE_SWIRL    = 0.55;      // rad/sec around the model's axis
+const PARTICLE_DRIFT    = 0.35;      // rad/sec of slow latitude wander
+const PARTICLE_TWINKLE  = 2.4;       // brightness flicker speed
+const PARTICLE_BURST    = 2.6;       // motion multiplier right after a snap
+const PARTICLE_BURST_R  = 0.55;      // how far the shell blows outward on a snap
+const PARTICLE_BURST_MS = 900;       // how long that burst lasts
+
+/* ---- glove (worn on the hand) ------------------------------
+   Drop an OBJ + MTL (+ textures) into the folder below and it
+   gets mounted on the hand automatically. Missing files are not
+   an error — the app just runs without the glove.
+   ------------------------------------------------------------ */
+const GLOVE_ON        = true;
+const GLOVE_DIR       = 'glove/';
+const GLOVE_OBJ       = 'ace_gauntlet.obj';
+const GLOVE_MTL       = 'ace_gauntlet.mtl';
+// Which way the source model points, read off its own geometry: the long axis
+// runs along Z with the fingertips at -Z, and the gems sit on the -Y face.
+const GLOVE_FINGER_AXIS = '-z';  // model axis pointing at the fingertips
+const GLOVE_BACK_AXIS   = '-y';  // model axis pointing out of the back of the hand
+// Fit is described in the model's own anatomy rather than raw scale. This
+// gauntlet's mesh runs from the end of its flared cuff to its fingertips, and
+// the wrist sits ~67% of the way along, so the cuff can't be treated as the
+// mount point. Read off the model: fingertips at Z -5.20, wrist near Z 0.40,
+// cuff end at Z 12.00, total length 17.20.
+const GLOVE_WRIST_AT  = 0.674; // where the wrist sits, 0 = cuff end, 1 = fingertips
+const GLOVE_HAND_LEN  = 1.90;  // wrist → gauntlet fingertip, in palm lengths
+const GLOVE_ALONG     = 0;     // extra slide along the palm axis (+ = toward fingers)
+const GLOVE_OUT       = 0;     // lift off the palm plane (+ = toward the back of the hand)
+const GLOVE_SIDE      = 0;     // shift toward thumb / pinky
+const GLOVE_YAW       = 0;     // spin the glove about its own long axis (radians)
+const GLOVE_BRIGHTEN  = false; // this .mtl already has sensible colours
+// This mesh is a RIGHT-hand gauntlet (with the fingers along -Z and the back of
+// the hand along -Y, its thumb falls on the left — the right-hand arrangement).
+// The preview is mirrored, though, so a real right hand shows left-hand
+// chirality on screen and needs the mirrored mesh; a real left hand needs the
+// mesh as authored. Handedness cannot be recovered from the landmarks alone —
+// mirroring the hand flips the thumb position and the cross-product axes
+// together, leaving every dot product's sign unchanged — so it comes from
+// MediaPipe's label.
+const GLOVE_AUTO_FLIP  = true;
+// Used when no handedness label is available.
+const GLOVE_ASSUME_RIGHT_HAND = true;
+
+/* ---- articulation -----------------------------------------
+   The mesh is split into forearm / wrist / palm / per-finger
+   pieces so each one follows its own landmarks instead of the
+   whole gauntlet moving as a single block.
+   ------------------------------------------------------------ */
+const GLOVE_ARTICULATE = true;
+const FINGER_STRETCH   = true; // also stretch each finger to the real one's length
+const FINGER_MIN_SCALE = 0.25; // clamps, so a mis-detected landmark can't
+const FINGER_MAX_SCALE = 1.80; // blow a finger up or collapse it
+// 0 = each finger stays rooted at the model's own knuckle, 1 = it roots on the
+// real knuckle landmark, which is what makes the fingertips actually line up.
+const FINGER_ROOT_FOLLOW = 1;
+
+/* ---- the wrist -------------------------------------------------
+   Waving your hand and twisting it need opposite responses, so the
+   palm's rotation relative to the forearm is split into a swing
+   (where the hand points — your arm follows that) and a twist
+   (rotation about the forearm's own axis — that is the wrist, and
+   the cuff should barely follow it).
+   ---------------------------------------------------------------- */
+const WRIST_SWING_FOLLOW = 1.00; // arm swings with the hand straight away
+const WRIST_TWIST_FOLLOW = 0;    // but the cuff does not twist at all — that
+                                 // is the whole point of having a wrist. Raise
+                                 // it slightly if you want the cuff to creep
+                                 // around after a long hold.
+const WRIST_MAX_DEG      = 70;   // past this the forearm gets dragged along
+// MediaPipe labels handedness as though the image were a mirrored selfie, while
+// we feed it the raw frame. If the gauntlet fits the wrong hand, flip this.
+const GLOVE_SWAP_HANDS = true;
 /* ============================================================ */
 
 import { HandLandmarker, FilesetResolver } from
@@ -236,7 +334,8 @@ let lastVideoTime = -1;
 let primed = false;
 let primedAt = 0;
 let lastSnapAt = 0;
-let lastFrameAt = 0;   // for the filter's time step
+let lastFrameAt = 0;     // for the filter's time step
+let lastRenderAt = 0;    // for particle animation
 
 /* ---------------- three.js scene ---------------- */
 const renderer = new THREE.WebGLRenderer({ canvas: threeCv, alpha: true, antialias: true });
@@ -254,16 +353,26 @@ scene.add(fillLight);
 
 const model = new THREE.Group();
 model.visible = false;
+model.renderOrder = 1;
 scene.add(model);
 
 // inner wrapper that carries the slow self-rotation
 let spinner = null;
 
+// the glove is mounted from the whole hand pose, not the two fingertips
+const glove = new THREE.Group();
+glove.visible = false;
+glove.renderOrder = 0;
+scene.add(glove);
+let gloveLoaded = false;
+let gloveFlip = 1;   // -1 mirrors the mesh
+let handIsRight = GLOVE_ASSUME_RIGHT_HAND;
+
 /* ---------------- layout / coordinate mapping ----------------
    The video is displayed with `object-fit: cover`, which scales it uniformly
    (no stretching) and crops the overflow. These numbers reproduce that exact
    transform so landmarks land on the same screen pixel the camera image is
-   actually showing — that is what keeps the dots and the model from drifting.
+   actually showing — that is what keeps the model from drifting.
 */
 let screenW = 1, screenH = 1;                 // CSS px
 let coverW  = 1, coverH  = 1;                 // displayed video size, CSS px
@@ -351,8 +460,9 @@ function makePointFilter() {
   return (lm, dt) => ({ x: fx(lm.x, dt), y: fy(lm.y, dt), z: fz(lm.z || 0, dt) });
 }
 
-// one filter per landmark we actually use
-const FILTERED_IDS = [0, 4, 5, 12, 17];
+// one filter per landmark we actually use (9 is the middle knuckle, for the glove)
+// wrist, palm plane, and the base + tip of every finger the rig drives
+const FILTERED_IDS = [0, 2, 4, 5, 8, 9, 12, 13, 16, 17, 20];
 let pointFilters = null;
 function resetFilters() {
   pointFilters = {};
@@ -360,7 +470,43 @@ function resetFilters() {
 }
 resetFilters();
 
-/* ---------------- model loading ---------------- */
+/* ---------------- shared model helpers ---------------- */
+function prepMaterials(obj, brighten) {
+  obj.traverse(child => {
+    if (!child.isMesh) return;
+    // Some OBJs ship without vertex normals (this gauntlet does). Without them
+    // the lighting has nothing to work with and the mesh renders black.
+    if (child.geometry && !child.geometry.attributes.normal) {
+      child.geometry.computeVertexNormals();
+    }
+    const mats = Array.isArray(child.material) ? child.material : [child.material];
+    mats.forEach(m => {
+      if (!m) return;
+      m.side = THREE.DoubleSide;
+      if (m.map) m.map.colorSpace = THREE.SRGBColorSpace;
+      // Only worth doing when there is a texture underneath: Kd is what dims
+      // it. With no map, Kd *is* the model's colour, and whitening it throws
+      // that colour away.
+      if (brighten && m.color && m.map) m.color.setHex(0xffffff);
+    });
+  });
+}
+
+// load an OBJ, using its MTL when one is present
+async function loadObjWithMtl(dir, objFile, mtlFile, onProgress) {
+  let materials = null;
+  try {
+    materials = await new MTLLoader().setPath(dir).loadAsync(mtlFile);
+    materials.preload();
+  } catch (e) {
+    materials = null;   // no .mtl is fine — OBJLoader falls back to a default
+  }
+  const loader = new OBJLoader().setPath(dir);
+  if (materials) loader.setMaterials(materials);
+  return loader.loadAsync(objFile, onProgress);
+}
+
+/* ---------------- the model the hand holds ---------------- */
 // Rotate a Z-up (or X-up) source model so its height runs along +Y, then
 // scale it to height 1 and centre it so it spans -0.5Y .. +0.5Y.
 function normalizeModel(obj) {
@@ -384,29 +530,461 @@ function normalizeModel(obj) {
 }
 
 async function loadModel(onProgress) {
-  const materials = await new MTLLoader()
-    .setPath(MODEL_DIR)
-    .loadAsync(MODEL_MTL);
-  materials.preload();
+  const obj = await loadObjWithMtl(MODEL_DIR, MODEL_OBJ, MODEL_MTL, onProgress);
+  prepMaterials(obj, MODEL_BRIGHTEN);   // thin lattice reads better lit both sides
+  model.add(normalizeModel(obj));
+}
 
-  const obj = await new OBJLoader()
-    .setMaterials(materials)
-    .setPath(MODEL_DIR)
-    .loadAsync(MODEL_OBJ, onProgress);
+/* ---------------- the glove worn on the hand ----------------
+   Normalized so the wrist end sits at the origin and the fingers point along
+   +Y with a total height of 1. Mounting then just scales by palm length. */
+const AXIS_VECTORS = {
+   'x': [ 1, 0, 0], '-x': [-1, 0, 0],
+   'y': [ 0, 1, 0], '-y': [ 0,-1, 0],
+   'z': [ 0, 0, 1], '-z': [ 0, 0,-1]
+};
+function axisVector(key) {
+  const a = AXIS_VECTORS[key] || AXIS_VECTORS['y'];
+  return new THREE.Vector3(a[0], a[1], a[2]);
+}
 
-  // thin lattice geometry reads better lit from both sides
-  obj.traverse(child => {
-    if (!child.isMesh) return;
-    const mats = Array.isArray(child.material) ? child.material : [child.material];
-    mats.forEach(m => {
-      if (!m) return;
-      m.side = THREE.DoubleSide;
-      if (m.map) m.map.colorSpace = THREE.SRGBColorSpace;
-      if (MODEL_BRIGHTEN && m.color) m.color.setHex(0xffffff);
+// Which mesh follows which finger. finger_3 is the one nearest the thumb in the
+// source mesh (thumb at +X, finger_3 at X 0.86..1.98), so it is the index.
+const FINGER_RIG = [
+  { mesh: 'finger_3', cap: 'knuckle_cap_3', mcp: 5,  tip: 8  },  // index
+  { mesh: 'finger_2', cap: 'knuckle_cap_2', mcp: 9,  tip: 12 },  // middle
+  { mesh: 'finger_1', cap: 'knuckle_cap_1', mcp: 13, tip: 16 },  // ring
+  { mesh: 'finger_0', cap: 'knuckle_cap_0', mcp: 17, tip: 20 },  // pinky
+  { mesh: 'thumb',    cap: null,            mcp: 2,  tip: 4  }   // thumb
+];
+// Everything not listed here stays on the forearm: the cuff, bands, filigree
+// and gems, which should not swing with the hand.
+const PALM_MESHES = ['hand_palm'];
+
+let wristPivot = null;
+const fingerRigs = [];
+const forearmQuat = new THREE.Quaternion();
+let forearmInit = false;
+
+// Split a rotation into the part about `axis` (twist) and the rest (swing).
+function swingTwist(q, axis) {
+  const p = new THREE.Vector3(q.x, q.y, q.z);
+  const proj = axis.clone().multiplyScalar(p.dot(axis));
+  const twist = new THREE.Quaternion(proj.x, proj.y, proj.z, q.w);
+  if (twist.lengthSq() < 1e-12) twist.set(0, 0, 0, 1);   // 180° edge case
+  twist.normalize();
+  const swing = q.clone().multiply(twist.clone().invert());
+  return { swing, twist };
+}
+
+function normalizeGlove(obj) {
+  // Rotate the model so its fingertips point along +Y and the back of the hand
+  // faces +Z, which is the frame updateGlove() mounts into.
+  const finger = axisVector(GLOVE_FINGER_AXIS).normalize();
+  const back   = axisVector(GLOVE_BACK_AXIS);
+  back.addScaledVector(finger, -back.dot(finger));
+  if (back.lengthSq() < 1e-8) back.set(0, 0, 1).addScaledVector(finger, -finger.z);
+  back.normalize();
+  const side = new THREE.Vector3().crossVectors(finger, back);   // right-handed
+  obj.quaternion.setFromRotationMatrix(
+    new THREE.Matrix4().makeBasis(side, finger, back).invert()
+  );
+  obj.updateMatrixWorld(true);
+
+  const box = new THREE.Box3().setFromObject(obj);
+  const size = new THREE.Vector3(); box.getSize(size);
+  const center = new THREE.Vector3(); box.getCenter(center);
+  if (size.y < 1e-9) return obj;
+
+  // height 1, wrist end sitting at y = 0 so mounting is just a scale
+  const s = 1 / size.y;
+  obj.scale.setScalar(s);
+  obj.position.set(-center.x * s, -box.min.y * s, -center.z * s);
+
+  const yaw = new THREE.Group();
+  yaw.add(obj);
+  yaw.rotation.y = GLOVE_YAW;
+  return yaw;
+}
+
+// Average the vertices at each end of a mesh along Y, giving the two points a
+// finger actually runs between. More faithful than a bounding box for parts
+// that sit at an angle, like the thumb.
+function meshEnds(mesh) {
+  const pos = mesh.geometry.attributes.position;
+  const v = new THREE.Vector3();
+  const ys = [];
+  for (let i = 0; i < pos.count; i++) {
+    ys.push(v.fromBufferAttribute(pos, i).applyMatrix4(mesh.matrixWorld).y);
+  }
+  ys.sort((a, b) => a - b);
+  const loCut = ys[Math.floor(ys.length * 0.2)];
+  const hiCut = ys[Math.floor(ys.length * 0.8)];
+
+  const base = new THREE.Vector3(), tip = new THREE.Vector3();
+  let nb = 0, nt = 0;
+  for (let i = 0; i < pos.count; i++) {
+    v.fromBufferAttribute(pos, i).applyMatrix4(mesh.matrixWorld);
+    if (v.y <= loCut)      { base.add(v); nb++; }
+    else if (v.y >= hiCut) { tip.add(v);  nt++; }
+  }
+  if (nb) base.divideScalar(nb);
+  if (nt) tip.divideScalar(nt);
+  return { base, tip };
+}
+
+// Re-parent the meshes into a forearm → wrist → finger hierarchy. attach()
+// keeps every piece exactly where it already sits, so this only changes what
+// each piece is allowed to move with.
+function buildGloveRig(root) {
+  root.updateMatrixWorld(true);
+  const byName = {};
+  root.traverse(c => { if (c.isMesh && c.name) byName[c.name] = c; });
+
+  // The wrist joint. Anything under it follows the palm; the cuff left behind
+  // in `root` keeps the forearm's own, much steadier orientation.
+  wristPivot = new THREE.Group();
+  wristPivot.position.set(0, GLOVE_WRIST_AT, 0);
+  root.add(wristPivot);
+  root.updateMatrixWorld(true);
+
+  PALM_MESHES.forEach(n => { if (byName[n]) wristPivot.attach(byName[n]); });
+
+  FINGER_RIG.forEach(spec => {
+    const mesh = byName[spec.mesh];
+    if (!mesh) return;
+
+    // Pivot at the knuckle — the base of the finger — pointing up its length.
+    // Taken from the ends of the mesh itself rather than its bounding box,
+    // since an angled part like the thumb is badly described by a box.
+    const ends = meshEnds(mesh);
+    wristPivot.updateMatrixWorld(true);
+    const kLocal = wristPivot.worldToLocal(ends.base);
+    const tLocal = wristPivot.worldToLocal(ends.tip);
+    const dir = tLocal.clone().sub(kLocal);
+    const len = dir.length();
+    if (len < 1e-9) return;
+    dir.divideScalar(len);
+
+    const pivot = new THREE.Group();
+    pivot.position.copy(kLocal);
+    // Rest rotation aligns the pivot's own +Y with the finger, so scaling Y
+    // later stretches it along its length rather than sideways.
+    pivot.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
+    wristPivot.add(pivot);
+    wristPivot.updateMatrixWorld(true);
+    pivot.updateMatrixWorld(true);
+
+    pivot.attach(mesh);
+    if (spec.cap && byName[spec.cap]) pivot.attach(byName[spec.cap]);
+
+    fingerRigs.push({
+      pivot,
+      rest: pivot.quaternion.clone(),
+      restPos: kLocal.clone(),
+      restDir: dir.clone(),
+      restLen: len,
+      mcp: spec.mcp,
+      tip: spec.tip
     });
   });
+}
 
-  model.add(normalizeModel(obj));
+async function loadGlove() {
+  const obj = await loadObjWithMtl(GLOVE_DIR, GLOVE_OBJ, GLOVE_MTL);
+  prepMaterials(obj, GLOVE_BRIGHTEN);
+  const root = normalizeGlove(obj);
+  if (GLOVE_ARTICULATE) buildGloveRig(root);
+  glove.add(root);
+  gloveLoaded = true;
+}
+
+// Point each gauntlet finger down its real counterpart, and stretch it to the
+// same length so a curled finger foreshortens instead of poking through.
+function updateFingers(pts) {
+  if (!wristPivot) return;
+  glove.updateMatrixWorld(true);
+
+  fingerRigs.forEach(r => {
+    const a = wristPivot.worldToLocal(toWorld(pts[r.mcp]));
+    const b = wristPivot.worldToLocal(toWorld(pts[r.tip]));
+    const d = b.clone().sub(a);
+    const len = d.length();
+    if (len < 1e-9) return;
+    d.divideScalar(len);
+
+    // Root the finger on the real knuckle, otherwise it points the right way
+    // but starts in the wrong place and the tip lands short.
+    r.pivot.position.lerpVectors(r.restPos, a, FINGER_ROOT_FOLLOW);
+
+    r.pivot.quaternion
+      .setFromUnitVectors(r.restDir, d)
+      .multiply(r.rest);
+
+    if (FINGER_STRETCH) {
+      const k = THREE.MathUtils.clamp(
+        len / r.restLen, FINGER_MIN_SCALE, FINGER_MAX_SCALE
+      );
+      r.pivot.scale.set(1, k, 1);
+    }
+  });
+}
+
+// Mount the glove on the whole hand: wrist → middle knuckle gives the long
+// axis and the size, the palm plane gives which way the back of the hand faces.
+function updateGlove(pts) {
+  if (!gloveLoaded) return;
+
+  const wrist  = toWorld(pts[0]);
+  const midMcp = toWorld(pts[9]);
+  const idxMcp = toWorld(pts[5]);
+  const pkyMcp = toWorld(pts[17]);
+
+  const up = midMcp.clone().sub(wrist);
+  const palmLen = up.length();
+  if (palmLen < 1e-6) { glove.visible = false; return; }
+  up.divideScalar(palmLen);
+
+  const normal = new THREE.Vector3().crossVectors(
+    idxMcp.clone().sub(wrist),
+    pkyMcp.clone().sub(wrist)
+  );
+  if (normal.lengthSq() < 1e-12) normal.set(0, 0, 1);
+  normal.normalize();
+  normal.addScaledVector(up, -normal.dot(up));
+  if (normal.lengthSq() < 1e-8) {
+    normal.set(0, 0, 1).addScaledVector(up, -up.z);
+    if (normal.lengthSq() < 1e-8) normal.set(1, 0, 0).addScaledVector(up, -up.x);
+  }
+  normal.normalize();
+
+  // Each hand needs exactly one of these, never both — verified by testing all
+  // four combinations against three independent checks (thumb side, which way
+  // the ornamented back faces, and index-vs-pinky order):
+  //   right hand → negate the normal, turning the mesh about the palm axis
+  //   left hand  → mirror the mesh across its own width
+  gloveFlip = 1;
+  if (GLOVE_AUTO_FLIP) {
+    if (handIsRight) normal.negate();
+    else             gloveFlip = -1;
+  }
+
+  const right = new THREE.Vector3().crossVectors(up, normal).normalize();
+  const palmQuat = new THREE.Quaternion().setFromRotationMatrix(
+    new THREE.Matrix4().makeBasis(right, up, normal)
+  );
+
+  // --- the wrist joint ------------------------------------------------------
+  // Split the palm's rotation relative to the forearm into swing and twist.
+  // The arm follows the swing (move your hand and your forearm goes with it)
+  // but hardly any of the twist — that is what the wrist is for. Past the
+  // joint's limit the forearm is dragged along, the way a real arm would turn.
+  if (!forearmInit) { forearmQuat.copy(palmQuat); forearmInit = true; }
+  else {
+    const relRaw = forearmQuat.clone().invert().multiply(palmQuat);
+    const { swing, twist } = swingTwist(relRaw, new THREE.Vector3(0, 1, 0));
+    const id = new THREE.Quaternion();
+    forearmQuat
+      .multiply(id.clone().slerp(swing, WRIST_SWING_FOLLOW))
+      .multiply(id.clone().slerp(twist, WRIST_TWIST_FOLLOW))
+      .normalize();
+  }
+
+  let rel = forearmQuat.clone().invert().multiply(palmQuat);
+  const maxRad = THREE.MathUtils.degToRad(WRIST_MAX_DEG);
+  const bend = 2 * Math.acos(Math.min(1, Math.abs(rel.w)));
+  if (bend > maxRad) {
+    forearmQuat.slerp(palmQuat, 1 - maxRad / bend);
+    rel = forearmQuat.clone().invert().multiply(palmQuat);
+  }
+
+  glove.quaternion.copy(forearmQuat);
+  if (wristPivot) wristPivot.quaternion.copy(rel);
+
+  // Total mesh length that makes the gauntlet's fingertips reach the hand's.
+  const total = GLOVE_HAND_LEN / Math.max(1 - GLOVE_WRIST_AT, 1e-3);
+  const scale = palmLen * total;
+
+  // The model is sculpted for one hand — mirror it across its own width for
+  // the other one. DoubleSide materials keep it rendering after the flip.
+  glove.scale.set(scale * gloveFlip, scale, scale);
+
+  // Slide the mesh down so its wrist point, not its cuff end, sits on the
+  // wrist. The offsets ride the forearm's frame, which is what carries the mesh.
+  const upF     = new THREE.Vector3(0, 1, 0).applyQuaternion(forearmQuat);
+  const normalF = new THREE.Vector3(0, 0, 1).applyQuaternion(forearmQuat);
+  const rightF  = new THREE.Vector3(1, 0, 0).applyQuaternion(forearmQuat);
+  glove.position.copy(wrist)
+    .addScaledVector(upF,     GLOVE_ALONG * palmLen - GLOVE_WRIST_AT * scale)
+    .addScaledVector(normalF, GLOVE_OUT   * palmLen)
+    .addScaledVector(rightF,  GLOVE_SIDE  * palmLen);
+  glove.visible = true;
+
+  if (GLOVE_ARTICULATE) updateFingers(pts);
+}
+
+/* ---------------- magic particles ----------------
+   Built from the reference images: a dense shell of very fine dust with the
+   silhouette edge reading brightest, plus a few bright star glints, and a
+   radial blow-out on a snap. */
+const layers = [];   // { points, pos, col, state, baseSize, spark }
+
+function makeDotTexture() {
+  const s = 64;
+  const c = document.createElement('canvas');
+  c.width = c.height = s;
+  const g = c.getContext('2d');
+  const grad = g.createRadialGradient(s/2, s/2, 0, s/2, s/2, s/2);
+  grad.addColorStop(0.00, 'rgba(255,255,255,1)');
+  grad.addColorStop(0.25, 'rgba(255,255,255,0.6)');
+  grad.addColorStop(1.00, 'rgba(255,255,255,0)');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, s, s);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+
+// A glint with a cross flare, like the bright points in the third reference.
+function makeStarTexture() {
+  const s = 128, h = s / 2;
+  const c = document.createElement('canvas');
+  c.width = c.height = s;
+  const g = c.getContext('2d');
+
+  const halo = g.createRadialGradient(h, h, 0, h, h, h);
+  halo.addColorStop(0.00, 'rgba(255,255,255,1)');
+  halo.addColorStop(0.12, 'rgba(255,255,255,0.55)');
+  halo.addColorStop(0.40, 'rgba(255,255,255,0.10)');
+  halo.addColorStop(1.00, 'rgba(255,255,255,0)');
+  g.fillStyle = halo;
+  g.fillRect(0, 0, s, s);
+
+  // four tapered spikes
+  g.globalCompositeOperation = 'lighter';
+  g.fillStyle = 'rgba(255,255,255,0.85)';
+  [0, Math.PI / 2].forEach(rot => {
+    g.save();
+    g.translate(h, h);
+    g.rotate(rot);
+    g.beginPath();
+    g.moveTo(-h, 0); g.lineTo(0, -2.2); g.lineTo(h, 0); g.lineTo(0, 2.2);
+    g.closePath();
+    g.fill();
+    g.restore();
+  });
+
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+
+function pickPaletteColor(out) {
+  let r = Math.random(), i = 0;
+  while (i < PARTICLE_PALETTE_W.length - 1 && r > PARTICLE_PALETTE_W[i]) {
+    r -= PARTICLE_PALETTE_W[i];
+    i++;
+  }
+  return out.setHex(PARTICLE_PALETTE[i]);
+}
+
+function buildLayer(count, baseSize, texture, spark) {
+  const pos = new Float32Array(count * 3);
+  const col = new Float32Array(count * 3);
+  const state = [];
+  const tmp = new THREE.Color();
+
+  for (let i = 0; i < count; i++) {
+    // A point on a shell: uniform on the sphere, then pulled inward by a
+    // squared random so most of them sit close to the surface.
+    const u = Math.random() * 2 - 1;                 // cos(latitude)
+    const depth = Math.random() * Math.random();     // biased toward 0 = the rim
+    pickPaletteColor(tmp);
+    state.push({
+      theta: Math.random() * Math.PI * 2,
+      phi:   Math.acos(u),
+      r:     PARTICLE_SHELL_R * (1 - PARTICLE_SHELL_THICK * depth),
+      w:     PARTICLE_SWIRL * (0.55 + Math.random()) * (Math.random() < 0.25 ? -1 : 1),
+      dw:    PARTICLE_DRIFT * (Math.random() - 0.5),
+      tw:    Math.random() * Math.PI * 2,
+      twW:   PARTICLE_TWINKLE * (0.5 + Math.random()),
+      base:  spark ? 0.85 + Math.random() * 0.15 : 0.55 + Math.random() * 0.45,
+      cr: tmp.r, cg: tmp.g, cb: tmp.b
+    });
+    col[i*3] = tmp.r; col[i*3+1] = tmp.g; col[i*3+2] = tmp.b;
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('color',    new THREE.BufferAttribute(col, 3));
+
+  const points = new THREE.Points(geo, new THREE.PointsMaterial({
+    size: baseSize,
+    map: texture,
+    vertexColors: true,
+    transparent: true,
+    opacity: 1.0,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false,
+    sizeAttenuation: true
+  }));
+  points.frustumCulled = false;      // positions are rewritten every frame
+  points.renderOrder = 2;
+  model.add(points);                 // rides along with the model for free
+
+  layers.push({
+    points, state, baseSize, spark,
+    pos: geo.attributes.position,
+    col: geo.attributes.color
+  });
+}
+
+function buildParticles() {
+  buildLayer(PARTICLE_DUST_COUNT,  PARTICLE_DUST_SIZE,  makeDotTexture(),  false);
+  buildLayer(PARTICLE_SPARK_COUNT, PARTICLE_SPARK_SIZE, makeStarTexture(), true);
+}
+
+function updateParticles(dt, modelScale, now) {
+  if (!layers.length) return;
+
+  // brief flourish right after a snap: everything speeds up, the shell blows
+  // outward, and the whole cloud brightens
+  const since = now - lastSnapAt;
+  const t = since < PARTICLE_BURST_MS ? 1 - since / PARTICLE_BURST_MS : 0;
+  const boost  = 1 + (PARTICLE_BURST - 1) * t;
+  const swell  = 1 + PARTICLE_BURST_R * t;
+
+  layers.forEach(L => {
+    const p = L.pos.array, c = L.col.array;
+    for (let i = 0; i < L.state.length; i++) {
+      const s = L.state[i];
+      s.theta += s.w  * boost * dt;
+      s.phi   += s.dw * boost * dt;
+      // bounce off the poles so nothing piles up at the top or bottom
+      if (s.phi < 0.05)          { s.phi = 0.05;          s.dw = -s.dw; }
+      else if (s.phi > Math.PI - 0.05) { s.phi = Math.PI - 0.05; s.dw = -s.dw; }
+      s.tw += s.twW * dt;
+
+      const r  = s.r * swell;
+      const sp = Math.sin(s.phi);
+      p[i*3]     = r * sp * Math.cos(s.theta);
+      p[i*3 + 1] = r * Math.cos(s.phi) * PARTICLE_SHELL_TALL;
+      p[i*3 + 2] = r * sp * Math.sin(s.theta);
+
+      // Twinkle, and lift the ones near the silhouette edge — that rim
+      // brightening is what makes the reference read as a shell.
+      const rim = 0.62 + 0.38 * sp;
+      const k = s.base * rim * (0.72 + 0.28 * Math.sin(s.tw)) * (1 + 0.8 * t);
+      c[i*3]     = s.cr * k;
+      c[i*3 + 1] = s.cg * k;
+      c[i*3 + 2] = s.cb * k;
+    }
+    L.pos.needsUpdate = true;
+    L.col.needsUpdate = true;
+
+    // point size is in world units and ignores the parent's scale, so track it
+    L.points.material.size = L.baseSize * modelScale * (L.spark ? boost : 1);
+  });
 }
 
 /* ---------------- start ---------------- */
@@ -435,6 +1013,18 @@ startBtn.addEventListener('click', async () => {
       }
     });
 
+    if (PARTICLES_ON) buildParticles();
+
+    if (GLOVE_ON) {
+      statusEl.textContent = 'Loading glove… 載入手套中…';
+      try {
+        await loadGlove();
+      } catch (e) {
+        // no glove asset yet — carry on without it
+        console.warn('glove not loaded:', e.message);
+      }
+    }
+
     statusEl.textContent = 'Requesting camera… 請求相機權限…';
     // Ask for a stream shaped like the screen, so `cover` crops as little as
     // possible. Any resolution the device returns still maps correctly.
@@ -453,6 +1043,9 @@ startBtn.addEventListener('click', async () => {
     startScreen.style.display = 'none';
     camWrap.style.display = 'block';
     hint.style.display = 'block';
+    hint.textContent = gloveLoaded
+      ? '偵測中…請彈指'
+      : `偵測中…請彈指（找不到 ${GLOVE_DIR}${GLOVE_OBJ}，未載入手套）`;
     layout();
 
     running = true;
@@ -470,14 +1063,21 @@ function dist(a, b) {
 
 function tick() {
   if (!running) return;
+  const now = performance.now();
 
   if (cam.currentTime !== lastVideoTime) {
     lastVideoTime = cam.currentTime;
-    const result = landmarker.detectForVideo(cam, performance.now());
+    const result = landmarker.detectForVideo(cam, now);
     processHands(result);
   }
+
   // slow self-rotation, independent of the hand so it never looks jittery
-  if (spinner) spinner.rotation.y = (performance.now() / 1000) * MODEL_SPIN_SPEED;
+  if (spinner) spinner.rotation.y = (now / 1000) * MODEL_SPIN_SPEED;
+
+  const rdt = lastRenderAt ? Math.min((now - lastRenderAt) / 1000, 0.1) : 1 / 60;
+  lastRenderAt = now;
+  if (model.visible) updateParticles(rdt, model.scale.x, now);
+
   renderer.render(scene, camera3d);
   requestAnimationFrame(tick);
 }
@@ -488,10 +1088,19 @@ function processHands(result) {
   const now = performance.now();
   const hand = result.landmarks && result.landmarks[0];
 
+  // which hand is on screen, so the model can be mirrored for the other one
+  const hd = result.handedness && result.handedness[0] && result.handedness[0][0];
+  if (hd) {
+    const labelIsRight = hd.categoryName.toLowerCase() === 'right';
+    handIsRight = GLOVE_SWAP_HANDS ? !labelIsRight : labelIsRight;
+  }
+
   if (!hand) {
     primed = false;
     model.visible = false;
+    glove.visible = false;
     resetFilters();   // start clean next time the hand appears
+    forearmInit = false;
     lastFrameAt = 0;
     return;
   }
@@ -509,6 +1118,7 @@ function processHands(result) {
   FILTERED_IDS.forEach(i => { smooth[i] = pointFilters[i](hand[i], dt); });
 
   updateModel(smooth);
+  updateGlove(smooth);
 
   // normalize by hand size so detection works near or far
   const handSize = dist(wrist, middleMcp);
@@ -516,7 +1126,6 @@ function processHands(result) {
   const pinchDist = dist(thumbTip, middleTip) / handSize;
 
   if (SHOW_LANDMARKS) {
-    // draw the smoothed points so the dots match what the model is doing
     drawDot(smooth[4],  primed ? '#6fcf97' : '#4a90d9');
     drawDot(smooth[12], primed ? '#6fcf97' : '#4a90d9');
   }

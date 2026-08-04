@@ -1,0 +1,41 @@
+# ACE Gauntlet materials
+newmtl BlackLeather
+Ka 0.025 0.025 0.028
+Kd 0.120 0.125 0.130
+Ks 0.180 0.170 0.150
+Ns 70
+map_Kd ace_gauntlet_texture.jpg
+
+newmtl GoldFiligree
+Ka 0.160 0.095 0.025
+Kd 0.620 0.390 0.095
+Ks 0.930 0.740 0.330
+Ns 260
+
+newmtl GemPurple
+Ka 0.15 0.02 0.22
+Kd 0.55 0.08 0.82
+Ks 1.0 0.75 1.0
+Ns 420
+illum 4
+
+newmtl GemYellow
+Ka 0.22 0.16 0.01
+Kd 0.95 0.72 0.08
+Ks 1.0 0.95 0.55
+Ns 420
+illum 4
+
+newmtl GemBlue
+Ka 0.01 0.09 0.20
+Kd 0.08 0.42 0.90
+Ks 0.65 0.9 1.0
+Ns 420
+illum 4
+
+newmtl GemRed
+Ka 0.22 0.01 0.015
+Kd 0.88 0.08 0.07
+Ks 1.0 0.65 0.55
+Ns 420
+illum 4
