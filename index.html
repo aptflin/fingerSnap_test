@@ -169,6 +169,45 @@
     to   { opacity: 0; transform: scale(1.3); }
   }
 
+  /* the photo taken at the moment of the snap, shown once the video ends */
+  #photoView {
+    position: fixed;
+    inset: 0;
+    z-index: 32;
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 18px;
+    background: #000;
+    padding: 20px 16px calc(20px + env(safe-area-inset-bottom, 0px));
+  }
+  #photoView.show { display: flex; animation: photoIn 420ms ease-out; }
+  @keyframes photoIn {
+    from { opacity: 0; transform: scale(0.92); }
+    to   { opacity: 1; transform: scale(1); }
+  }
+  #photoImg {
+    max-width: 100%;
+    max-height: calc(100% - 76px);
+    object-fit: contain;
+    border-radius: 4px;
+    box-shadow: 0 0 40px rgba(120, 190, 255, 0.25);
+  }
+  #photoBar { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+  #photoBar button, #photoBar a {
+    padding: 11px 22px;
+    font-size: 15px;
+    font-family: inherit;
+    border: 1px solid #444;
+    border-radius: 4px;
+    background: #1b1b1b;
+    color: #eee;
+    cursor: pointer;
+    text-decoration: none;
+  }
+  #photoBar a { border-color: #4a7fa8; }
+
   #player {
     position: fixed;
     inset: 0;
@@ -253,6 +292,14 @@
 
 <video id="player" src="video.mp4" playsinline preload="auto"></video>
 
+<div id="photoView">
+  <img id="photoImg" alt="snap photo">
+  <div id="photoBar">
+    <a id="photoSave" download="snap.jpg">儲存 · Save</a>
+    <button id="photoClose">繼續 · Continue</button>
+  </div>
+</div>
+
 <script type="module">
 /* ============================================================
    Tunables — adjust snap detection here
@@ -327,13 +374,23 @@ const VIDEO_POP_FROM  = 0.04;   // scale it collapses back to on close
    hand tracking and would make a main-thread ramp stutter.
    -------------------------------------------------------------- */
 const SNAP_SFX_SRC       = 'finger_snap.mp3';   // 0.32s
-const SNAP_SFX_VOLUME    = 1.5;
+const SNAP_SFX_VOLUME    = 3;
 const VIDEO_SFX_SRC      = 'Short_Version.mp3'; // 26.6s source, sliced below
 const VIDEO_SFX_START    = 0;    // seconds into the track to start from
 const VIDEO_SFX_SECONDS  = 5;    // how much of it to play
 const VIDEO_SFX_VOLUME   = 0.75;
 const VIDEO_SFX_FADE_IN  = 0.35; // seconds
 const VIDEO_SFX_FADE_OUT = 0.9;  // seconds
+
+/* ---- the snap photo ------------------------------------------
+   The camera frame plus the 3D layer are composited at the moment
+   of the snap, then shown once the video finishes.
+   -------------------------------------------------------------- */
+const PHOTO_ON       = true;
+const PHOTO_QUALITY  = 0.92;  // JPEG quality
+const PHOTO_SCALE    = 1;     // 1 = screen resolution, 2 = sharper but heavier
+const PHOTO_SHOW_MS  = 9000;  // auto-dismiss; 0 = wait for a tap
+const PHOTO_KEEP     = 12;    // how many to keep in this session's gallery
 
 /* ---- magic particles ---------------------------------------
    A swirling column of glowing motes around the model, so it
@@ -1335,6 +1392,21 @@ function tick() {
   if (model.visible) updateParticles(rdt, model.scale.x, now);
 
   renderer.render(scene, camera3d);
+
+  // Must happen here, not later: with preserveDrawingBuffer off the WebGL
+  // canvas is only readable between rendering and the browser compositing it.
+  if (pendingCapture) {
+    pendingCapture = false;
+    try {
+      lastPhoto = capturePhoto();
+      photos.push(lastPhoto);
+      while (photos.length > PHOTO_KEEP) photos.shift();
+    } catch (e) {
+      console.warn('photo capture failed:', e.message);
+      lastPhoto = null;
+    }
+  }
+
   requestAnimationFrame(tick);
 }
 
@@ -1391,8 +1463,8 @@ function processHands(result) {
     drawDot(smooth[12], primed ? '#6fcf97' : '#4a90d9');
   }
 
-  // snapping only works once the gauntlet is on
-  if (!equipped()) { primed = false; return; }
+  // snapping only works once the gauntlet is on, and not while the photo is up
+  if (!equipped() || photoView.classList.contains('show')) { primed = false; return; }
 
   // state machine: pinch (primed) → fast release = snap
   if (!primed) {
@@ -1541,11 +1613,72 @@ function stopVideoSfx() {
   videoSfxStop = setTimeout(() => videoSfx.el.pause(), 240);
 }
 
+/* ---------------- the snap photo ---------------- */
+const photoView  = document.getElementById('photoView');
+const photoImg   = document.getElementById('photoImg');
+const photoSave  = document.getElementById('photoSave');
+const photoClose = document.getElementById('photoClose');
+
+let pendingCapture = false;   // set on a snap, consumed by the next render
+let lastPhoto = null;
+let photoTimer = null;
+const photos = [];            // this session's gallery
+
+// Composite exactly what is on screen: the camera cropped and mirrored the way
+// CSS shows it, with the 3D layer over the top.
+function capturePhoto() {
+  const dpr = Math.min(window.devicePixelRatio || 1, MAX_PIXEL_RATIO) * PHOTO_SCALE;
+  const w = Math.max(1, Math.round(screenW * dpr));
+  const h = Math.max(1, Math.round(screenH * dpr));
+
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const g = c.getContext('2d');
+  g.fillStyle = '#000';
+  g.fillRect(0, 0, w, h);
+
+  if (cam.videoWidth) {
+    // `cover` crop, then mirrored — the same transform the preview uses
+    g.save();
+    g.translate(w, 0);
+    g.scale(-1, 1);
+    g.drawImage(cam, coverX * dpr, coverY * dpr, coverW * dpr, coverH * dpr);
+    g.restore();
+  }
+  // the 3D canvas is already in screen space and unmirrored
+  g.drawImage(threeCv, 0, 0, w, h);
+
+  return c.toDataURL('image/jpeg', PHOTO_QUALITY);
+}
+
+function showPhoto() {
+  if (!lastPhoto) return false;
+  photoImg.src = lastPhoto;
+  photoSave.href = lastPhoto;
+  photoSave.download = `snap-${photos.length}.jpg`;
+  photoView.classList.add('show');
+  clearTimeout(photoTimer);
+  if (PHOTO_SHOW_MS > 0) photoTimer = setTimeout(hidePhoto, PHOTO_SHOW_MS);
+  return true;
+}
+
+function hidePhoto() {
+  clearTimeout(photoTimer);
+  photoView.classList.remove('show');
+  // let the user settle before the next snap counts
+  snapLockUntil = Math.max(snapLockUntil, performance.now() + EQUIP_GUARD_MS);
+}
+
+photoClose.addEventListener('click', hidePhoto);
+photoView.addEventListener('click', e => { if (e.target === photoView) hidePhoto(); });
+
 // Where on screen the snap happened, so the video can grow out of that spot.
 let popPoint = null;
 
 function onSnap(at) {
   playSnapSfx();
+  // grab the frame on the next render, while the WebGL buffer is still readable
+  if (PHOTO_ON) pendingCapture = true;
   snapFlash.classList.add('show');
   setTimeout(() => snapFlash.classList.remove('show'), 500);
 
@@ -1612,6 +1745,8 @@ player.addEventListener('ended', () => {
     player.style.transition = 'none';
     player.style.transform = 'scale(1)';
     player.style.opacity = '1';
+    // and here is the shot taken the instant you snapped
+    if (PHOTO_ON) showPhoto();
   }, VIDEO_CLOSE_MS);
 });
 </script>
