@@ -130,6 +130,45 @@
   }
   #snapFlash.show { opacity: 1; transition: opacity 0s; }
 
+  /* staged interaction: the prompt, then the countdown */
+  #countdown {
+    position: fixed;
+    inset: 0;
+    z-index: 16;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+  }
+  #countdown.show { display: flex; }
+  #countNum {
+    font-size: 22vmin;
+    font-weight: 200;
+    line-height: 1;
+    color: #fff;
+    text-shadow: 0 0 24px rgba(120, 190, 255, 0.65);
+    font-variant-numeric: tabular-nums;
+  }
+  #countNum.tick { animation: tick 0.9s ease-out; }
+  @keyframes tick {
+    from { transform: scale(1.35); opacity: 0.25; }
+    to   { transform: scale(1);    opacity: 1; }
+  }
+  #equipFlash {
+    position: fixed;
+    inset: 0;
+    z-index: 17;
+    background: radial-gradient(circle at 50% 50%,
+                rgba(150,210,255,0.55), rgba(150,210,255,0) 60%);
+    opacity: 0;
+    pointer-events: none;
+  }
+  #equipFlash.go { animation: equip 0.75s ease-out; }
+  @keyframes equip {
+    from { opacity: 1; transform: scale(0.7); }
+    to   { opacity: 0; transform: scale(1.3); }
+  }
+
   #player {
     position: fixed;
     inset: 0;
@@ -152,6 +191,8 @@
 
 <div id="hint">偵測中…請彈指</div>
 <div id="snapFlash">Snap detected!</div>
+<div id="countdown"><div id="countNum">2</div></div>
+<div id="equipFlash"></div>
 
 <div id="startScreen">
   <button id="startBtn">Start Camera 開啟相機偵測</button>
@@ -208,6 +249,18 @@ const FILTER_BETA       = 5;    // higher = less lag when your hand moves fast
 // Cap the render buffer on high-DPI phones so the GPU keeps up.
 const MAX_PIXEL_RATIO   = 2;
 
+/* ---- staged interaction -------------------------------------
+   Show the back of your hand → countdown → the gauntlet is put
+   on → only then can you snap to play, or open and close your
+   hand to resize the crystal.
+   ------------------------------------------------------------ */
+const REQUIRE_EQUIP    = true;  // false = everything is live immediately
+const BACK_FACING_MIN  = 0.55;  // how square-on the back of the hand must be,
+                                // 0 = any angle, 1 = perfectly flat to camera
+const EQUIP_COUNT_MS   = 3000;  // countdown length
+const EQUIP_FADE_MS    = 700;   // how long the gauntlet takes to materialize
+const UNEQUIP_AFTER_MS = 6000;  // hand out of frame this long → back to the start
+
 /* ---- magic particles ---------------------------------------
    A swirling column of glowing motes around the model, so it
    reads as the hand channelling something into it. Lives in the
@@ -219,15 +272,15 @@ const PARTICLES_ON      = true;
 // fine dust, plus a handful of much brighter glints with star flares.
 const PARTICLE_DUST_COUNT  = 2200;
 const PARTICLE_SPARK_COUNT = 90;
-const PARTICLE_DUST_SIZE   = 0.024;  // relative to the model's height
-const PARTICLE_SPARK_SIZE  = 0.075;
+const PARTICLE_DUST_SIZE   = 0.034;  // relative to the model's height
+const PARTICLE_SPARK_SIZE  = 0.15;
 
 // White / ice blue / violet, with a rare warm glint for contrast.
 const PARTICLE_PALETTE   = [0xffffff, 0x7fc4ff, 0xa070ff, 0xffc98a];
 const PARTICLE_PALETTE_W = [0.22,     0.34,     0.34,     0.10];
 
 // A shell rather than a filled cloud, so the silhouette edge reads brightest.
-const PARTICLE_SHELL_R     = 0.50;   // shell radius, model heights
+const PARTICLE_SHELL_R     = 0.60;   // shell radius, model heights
 const PARTICLE_SHELL_THICK = 0.26;   // how far inside the shell they scatter
 const PARTICLE_SHELL_TALL  = 1.30;   // stretch it vertically to suit a tall model
 
@@ -236,7 +289,7 @@ const PARTICLE_DRIFT    = 0.35;      // rad/sec of slow latitude wander
 const PARTICLE_TWINKLE  = 2.4;       // brightness flicker speed
 const PARTICLE_BURST    = 2.6;       // motion multiplier right after a snap
 const PARTICLE_BURST_R  = 0.55;      // how far the shell blows outward on a snap
-const PARTICLE_BURST_MS = 900;       // how long that burst lasts
+const PARTICLE_BURST_MS = 1800;       // how long that burst lasts
 
 /* ---- glove (worn on the hand) ------------------------------
    Drop an OBJ + MTL (+ textures) into the folder below and it
@@ -365,6 +418,107 @@ glove.visible = false;
 glove.renderOrder = 0;
 scene.add(glove);
 let gloveLoaded = false;
+const gloveMats = [];   // { m, base } so the gauntlet can fade in
+
+/* ---------------- staged interaction ----------------
+   WAIT → the user shows the back of their hand
+   COUNT → 3, 2, 1 while they hold it there
+   EQUIPPED → gauntlet on; snapping and resizing become live */
+const PHASE = { WAIT: 'wait', COUNT: 'count', EQUIPPED: 'equipped' };
+let phase = REQUIRE_EQUIP ? PHASE.WAIT : PHASE.EQUIPPED;
+let phaseAt = 0;
+let lastHandAt = 0;
+let equipAt = -1e9;
+let particleBurstAt = -1e9;   // set by a snap or by putting the gauntlet on
+let shownCount = -1;
+
+const countdownEl = document.getElementById('countdown');
+const countNumEl  = document.getElementById('countNum');
+const equipFlashEl = document.getElementById('equipFlash');
+
+const HINTS = {
+  [PHASE.WAIT]:     '手背朝向鏡頭  ·  Show the back of your hand',
+  [PHASE.COUNT]:    '保持不動  ·  Hold it there',
+  [PHASE.EQUIPPED]: '彈指播放  ·  開合縮放  ·  Snap to play · open hand to resize'
+};
+
+function setPhase(next, now) {
+  if (phase === next) return;
+  phase = next;
+  phaseAt = now;
+  hint.textContent = HINTS[next];
+  countdownEl.classList.toggle('show', next === PHASE.COUNT);
+  shownCount = -1;
+
+  if (next === PHASE.EQUIPPED) {
+    equipAt = now;
+    particleBurstAt = now;
+    lastSnapAt = now;           // no accidental trigger on the equip gesture
+    equipFlashEl.classList.remove('go');
+    void equipFlashEl.offsetWidth;   // restart the animation
+    equipFlashEl.classList.add('go');
+  } else {
+    setGloveOpacity(0);
+  }
+}
+
+// The palm normal already carries the handedness correction, so after it this
+// points straight out of the back of the hand.
+function backOfHandDir(pts) {
+  const wrist = toWorld(pts[0]);
+  const idx   = toWorld(pts[5]);
+  const pky   = toWorld(pts[17]);
+  const n = new THREE.Vector3().crossVectors(
+    idx.clone().sub(wrist), pky.clone().sub(wrist)
+  );
+  if (n.lengthSq() < 1e-12) return null;
+  n.normalize();
+  if (handIsRight) n.negate();
+  return n;
+}
+
+function updatePhase(pts, now, haveHand) {
+  if (!REQUIRE_EQUIP) return;
+
+  if (!haveHand) {
+    if (phase === PHASE.COUNT) setPhase(PHASE.WAIT, now);
+    else if (phase === PHASE.EQUIPPED && now - lastHandAt > UNEQUIP_AFTER_MS) {
+      setPhase(PHASE.WAIT, now);
+    }
+    return;
+  }
+  lastHandAt = now;
+  if (phase === PHASE.EQUIPPED) return;
+
+  const n = backOfHandDir(pts);
+  const facing = !!n && n.z > BACK_FACING_MIN;   // +z points at the camera
+
+  if (phase === PHASE.WAIT) {
+    if (facing) setPhase(PHASE.COUNT, now);
+  } else if (phase === PHASE.COUNT) {
+    if (!facing) { setPhase(PHASE.WAIT, now); return; }
+    const left = EQUIP_COUNT_MS - (now - phaseAt);
+    if (left <= 0) { setPhase(PHASE.EQUIPPED, now); return; }
+    const n3 = Math.ceil(left / 1000);
+    if (n3 !== shownCount) {
+      shownCount = n3;
+      countNumEl.textContent = n3;
+      countNumEl.classList.remove('tick');
+      void countNumEl.offsetWidth;
+      countNumEl.classList.add('tick');
+    }
+  }
+}
+
+const equipped = () => phase === PHASE.EQUIPPED;
+
+function setGloveOpacity(k) {
+  gloveMats.forEach(g => {
+    g.m.transparent = true;
+    g.m.opacity = g.base * k;
+    g.m.depthWrite = k > 0.98;
+  });
+}
 let gloveFlip = 1;   // -1 mirrors the mesh
 let handIsRight = GLOVE_ASSUME_RIGHT_HAND;
 
@@ -693,10 +847,21 @@ function buildGloveRig(root) {
 async function loadGlove() {
   const obj = await loadObjWithMtl(GLOVE_DIR, GLOVE_OBJ, GLOVE_MTL);
   prepMaterials(obj, GLOVE_BRIGHTEN);
+
+  // remember each material's own opacity so it can be faded in on equip
+  obj.traverse(c => {
+    if (!c.isMesh) return;
+    const mm = Array.isArray(c.material) ? c.material : [c.material];
+    mm.forEach(m => {
+      if (m && !gloveMats.some(g => g.m === m)) gloveMats.push({ m, base: m.opacity });
+    });
+  });
+
   const root = normalizeGlove(obj);
   if (GLOVE_ARTICULATE) buildGloveRig(root);
   glove.add(root);
   gloveLoaded = true;
+  setGloveOpacity(REQUIRE_EQUIP ? 0 : 1);
 }
 
 // Point each gauntlet finger down its real counterpart, and stretch it to the
@@ -734,6 +899,11 @@ function updateFingers(pts) {
 // axis and the size, the palm plane gives which way the back of the hand faces.
 function updateGlove(pts) {
   if (!gloveLoaded) return;
+  if (!equipped()) { glove.visible = false; return; }
+
+  // materialize over the first moments after it goes on
+  const fade = THREE.MathUtils.clamp((performance.now() - equipAt) / EQUIP_FADE_MS, 0, 1);
+  setGloveOpacity(fade);
 
   const wrist  = toWorld(pts[0]);
   const midMcp = toWorld(pts[9]);
@@ -949,7 +1119,7 @@ function updateParticles(dt, modelScale, now) {
 
   // brief flourish right after a snap: everything speeds up, the shell blows
   // outward, and the whole cloud brightens
-  const since = now - lastSnapAt;
+  const since = now - particleBurstAt;
   const t = since < PARTICLE_BURST_MS ? 1 - since / PARTICLE_BURST_MS : 0;
   const boost  = 1 + (PARTICLE_BURST - 1) * t;
   const swell  = 1 + PARTICLE_BURST_R * t;
@@ -1044,10 +1214,11 @@ startBtn.addEventListener('click', async () => {
     camWrap.style.display = 'block';
     hint.style.display = 'block';
     hint.textContent = gloveLoaded
-      ? '偵測中…請彈指'
-      : `偵測中…請彈指（找不到 ${GLOVE_DIR}${GLOVE_OBJ}，未載入手套）`;
+      ? HINTS[phase]
+      : `找不到 ${GLOVE_DIR}${GLOVE_OBJ}，未載入手套 · glove asset missing`;
     layout();
 
+    phaseAt = lastHandAt = performance.now();
     running = true;
     requestAnimationFrame(tick);
   } catch (err) {
@@ -1102,6 +1273,7 @@ function processHands(result) {
     resetFilters();   // start clean next time the hand appears
     forearmInit = false;
     lastFrameAt = 0;
+    updatePhase(null, now, false);
     return;
   }
 
@@ -1117,6 +1289,10 @@ function processHands(result) {
   const smooth = {};
   FILTERED_IDS.forEach(i => { smooth[i] = pointFilters[i](hand[i], dt); });
 
+  // Show the back of your hand → countdown → gauntlet on. Nothing below this
+  // does anything until that has happened.
+  updatePhase(smooth, now, true);
+
   updateModel(smooth);
   updateGlove(smooth);
 
@@ -1130,6 +1306,9 @@ function processHands(result) {
     drawDot(smooth[12], primed ? '#6fcf97' : '#4a90d9');
   }
 
+  // snapping only works once the gauntlet is on
+  if (!equipped()) { primed = false; return; }
+
   // state machine: pinch (primed) → fast release = snap
   if (!primed) {
     if (pinchDist < PINCH_ON) {
@@ -1141,6 +1320,7 @@ function processHands(result) {
       primed = false;
       if (now - primedAt < SNAP_WINDOW_MS && now - lastSnapAt > COOLDOWN_MS) {
         lastSnapAt = now;
+        particleBurstAt = now;
         onSnap();
       }
     } else if (now - primedAt > SNAP_WINDOW_MS && pinchDist > PINCH_ON) {
@@ -1155,6 +1335,9 @@ function processHands(result) {
 // the tower still leans with your fingers. Its facing direction is steady
 // (see USE_PALM_ROTATION) and the slow spin is applied in tick().
 function updateModel(pts) {
+  // the crystal only exists once the gauntlet is on
+  if (!equipped()) { model.visible = false; return; }
+
   const pMiddle = toWorld(pts[12]);
   const pThumb  = toWorld(pts[4]);
 
