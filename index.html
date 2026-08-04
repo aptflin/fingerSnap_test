@@ -179,6 +179,57 @@
     display: none;
     z-index: 30;
   }
+  /* Detonation, not a spring: almost all of the expansion happens in the first
+     few frames, then it slams to a stop. No overshoot — overshoot is what reads
+     as bouncy. The brightness spike is the flash of the blast. */
+  /* Measured across the first frames: 27% → 44% → 58%, then a surge to 79% by
+     100ms and a hard stop. Fast enough to read as a detonation, but not so
+     instant that you never see it erupt from the fingers. */
+  #player.blast {
+    animation: blast var(--pop, 320ms) cubic-bezier(0.12, 0.72, 0.2, 1) both;
+  }
+  @keyframes blast {
+    0%   { transform: scale(0.02); opacity: 0; filter: brightness(3.4) contrast(1.6); }
+    6%   { opacity: 1; }
+    22%  { filter: brightness(1.35) contrast(1.12); }   /* the flash is brief */
+    100% { transform: scale(1);    opacity: 1; filter: brightness(1) contrast(1); }
+  }
+
+  /* the shockwave ring thrown off at the snap point */
+  #shock {
+    position: fixed;
+    z-index: 29;
+    width: 16px;
+    height: 16px;
+    margin: -8px 0 0 -8px;
+    border-radius: 50%;
+    border: 6px solid rgba(210, 238, 255, 0.95);
+    box-shadow: 0 0 50px rgba(150, 210, 255, 0.95),
+                inset 0 0 30px rgba(150, 210, 255, 0.7);
+    opacity: 0;
+    pointer-events: none;
+    display: none;
+  }
+  #shock.go {
+    display: block;
+    animation: shock var(--shock, 560ms) cubic-bezier(0, 0.75, 0.2, 1) both;
+  }
+  @keyframes shock {
+    0%   { opacity: 1; transform: scale(1);  border-width: 6px; }
+    70%  { opacity: 0.45; }
+    100% { opacity: 0; transform: scale(70); border-width: 0.5px; }
+  }
+
+  /* the world flinches from the blast */
+  #camWrap.shake { animation: shake 300ms ease-out; }
+  @keyframes shake {
+    0%, 100% { transform: translate(0, 0); }
+    12% { transform: translate(-7px,  5px); }
+    26% { transform: translate( 6px, -6px); }
+    42% { transform: translate(-5px, -3px); }
+    58% { transform: translate( 4px,  4px); }
+    76% { transform: translate(-2px,  1px); }
+  }
 </style>
 </head>
 <body>
@@ -193,6 +244,7 @@
 <div id="snapFlash">Snap detected!</div>
 <div id="countdown"><div id="countNum">2</div></div>
 <div id="equipFlash"></div>
+<div id="shock"></div>
 
 <div id="startScreen">
   <button id="startBtn">Start Camera 開啟相機偵測</button>
@@ -260,6 +312,13 @@ const BACK_FACING_MIN  = 0.55;  // how square-on the back of the hand must be,
 const EQUIP_COUNT_MS   = 3000;  // countdown length
 const EQUIP_FADE_MS    = 700;   // how long the gauntlet takes to materialize
 const UNEQUIP_AFTER_MS = 6000;  // hand out of frame this long → back to the start
+
+// The video detonates out of wherever your fingers were when you snapped.
+// Short and front-loaded — a long ease reads as a bounce, not a blast.
+const VIDEO_POP_MS    = 320;    // how long the blast takes
+const VIDEO_SHOCK_MS  = 560;    // the shockwave ring outlives it slightly
+const VIDEO_CLOSE_MS  = 380;    // and it shrinks back when the video finishes
+const VIDEO_POP_FROM  = 0.04;   // scale it collapses back to on close
 
 /* ---- magic particles ---------------------------------------
    A swirling column of glowing motes around the model, so it
@@ -369,6 +428,7 @@ const startScreen = document.getElementById('startScreen');
 const startBtn    = document.getElementById('startBtn');
 const statusEl    = document.getElementById('status');
 const camWrap     = document.getElementById('camWrap');
+const shock       = document.getElementById('shock');
 const cam         = document.getElementById('cam');
 const overlay     = document.getElementById('overlay');
 const ctx         = overlay.getContext('2d');
@@ -1321,7 +1381,9 @@ function processHands(result) {
       if (now - primedAt < SNAP_WINDOW_MS && now - lastSnapAt > COOLDOWN_MS) {
         lastSnapAt = now;
         particleBurstAt = now;
-        onSnap();
+        // midpoint of the two fingers that did the snapping, in screen px
+        const a = toScreen(smooth[4]), b = toScreen(smooth[12]);
+        onSnap({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
       }
     } else if (now - primedAt > SNAP_WINDOW_MS && pinchDist > PINCH_ON) {
       // held too long without releasing — reset so a slow open doesn't trigger
@@ -1389,7 +1451,10 @@ function drawDot(lm, color) {
   ctx.fill();
 }
 
-function onSnap() {
+// Where on screen the snap happened, so the video can grow out of that spot.
+let popPoint = null;
+
+function onSnap(at) {
   snapFlash.classList.add('show');
   setTimeout(() => snapFlash.classList.remove('show'), 500);
 
@@ -1401,7 +1466,34 @@ function onSnap() {
     return;
   }
 
+  // Scaling about a transform-origin placed at the fingers makes the blast
+  // come out of them.
+  popPoint = at || { x: screenW / 2, y: screenH / 2 };
+
+  // shockwave thrown off from the same point
+  shock.style.left = `${popPoint.x}px`;
+  shock.style.top  = `${popPoint.y}px`;
+  shock.style.setProperty('--shock', `${VIDEO_SHOCK_MS}ms`);
+  shock.classList.remove('go');
+  void shock.offsetWidth;               // restart the animation
+  shock.classList.add('go');
+
+  // and the view flinches
+  camWrap.classList.remove('shake');
+  void camWrap.offsetWidth;
+  camWrap.classList.add('shake');
+  setTimeout(() => camWrap.classList.remove('shake'), 320);
+
+  player.style.transition = 'none';
+  player.style.transform = '';
+  player.style.opacity = '';
+  player.style.transformOrigin = `${popPoint.x}px ${popPoint.y}px`;
+  player.style.setProperty('--pop', `${VIDEO_POP_MS}ms`);
   player.style.display = 'block';
+  player.classList.remove('blast');
+  void player.offsetWidth;              // commit before the keyframes run
+  player.classList.add('blast');
+
   player.currentTime = 0;
   player.play().catch(err => {
     hint.textContent = 'Video play failed 影片播放失敗: ' + err.message;
@@ -1410,7 +1502,24 @@ function onSnap() {
 }
 
 player.addEventListener('ended', () => {
-  player.style.display = 'none';
+  // shrink back into the same spot it came from
+  const p = popPoint || { x: screenW / 2, y: screenH / 2 };
+  player.classList.remove('blast');     // the keyframes' fill would win otherwise
+  player.style.transform = 'scale(1)';
+  player.style.opacity = '1';
+  void player.offsetWidth;
+  player.style.transformOrigin = `${p.x}px ${p.y}px`;
+  player.style.transition =
+    `transform ${VIDEO_CLOSE_MS}ms cubic-bezier(.5,0,.75,0), ` +
+    `opacity ${VIDEO_CLOSE_MS}ms ease-in`;
+  player.style.transform = `scale(${VIDEO_POP_FROM})`;
+  player.style.opacity = '0';
+  setTimeout(() => {
+    player.style.display = 'none';
+    player.style.transition = 'none';
+    player.style.transform = 'scale(1)';
+    player.style.opacity = '1';
+  }, VIDEO_CLOSE_MS);
 });
 </script>
 
