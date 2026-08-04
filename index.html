@@ -263,7 +263,8 @@ const VIDEO_SRC       = 'video.mp4'; // ← put your video file here (same folde
 const PINCH_ON        = 0.30;  // thumb–middle tip distance below this = "primed" (fingers together)
 const RELEASE_OFF     = 0.75;  // distance above this after priming = snap released
 const SNAP_WINDOW_MS  = 400;   // release must happen within this time after priming
-const COOLDOWN_MS     = 1500;  // ignore further snaps for this long after triggering
+const SNAP_LOCK_MS    = 6500;  // after the video fires, ignore snaps for this long
+const EQUIP_GUARD_MS  = 700;   // brief guard so putting the glove on can't self-trigger
 const RESTART_ON_SNAP = true;  // snap while video playing → restart from beginning
 const SHOW_LANDMARKS  = false; // draw thumb/middle fingertip dots on the camera view
 
@@ -317,8 +318,22 @@ const UNEQUIP_AFTER_MS = 6000;  // hand out of frame this long → back to the s
 // Short and front-loaded — a long ease reads as a bounce, not a blast.
 const VIDEO_POP_MS    = 320;    // how long the blast takes
 const VIDEO_SHOCK_MS  = 560;    // the shockwave ring outlives it slightly
-const VIDEO_CLOSE_MS  = 380;    // and it shrinks back when the video finishes
+const VIDEO_CLOSE_MS  = 1;    // and it shrinks back when the video finishes
 const VIDEO_POP_FROM  = 0.04;   // scale it collapses back to on close
+
+/* ---- sound ---------------------------------------------------
+   Fades run on the Web Audio graph rather than by nudging
+   `audio.volume` from JS, because the render loop is busy with
+   hand tracking and would make a main-thread ramp stutter.
+   -------------------------------------------------------------- */
+const SNAP_SFX_SRC       = 'finger_snap.mp3';   // 0.32s
+const SNAP_SFX_VOLUME    = 0.9;
+const VIDEO_SFX_SRC      = 'Short_Version.mp3'; // 26.6s source, sliced below
+const VIDEO_SFX_START    = 0;    // seconds into the track to start from
+const VIDEO_SFX_SECONDS  = 5;    // how much of it to play
+const VIDEO_SFX_VOLUME   = 0.75;
+const VIDEO_SFX_FADE_IN  = 0.35; // seconds
+const VIDEO_SFX_FADE_OUT = 0.9;  // seconds
 
 /* ---- magic particles ---------------------------------------
    A swirling column of glowing motes around the model, so it
@@ -446,7 +461,7 @@ let lastVideoTime = -1;
 // snap state machine
 let primed = false;
 let primedAt = 0;
-let lastSnapAt = 0;
+let snapLockUntil = 0;   // snaps are ignored until this moment
 let lastFrameAt = 0;     // for the filter's time step
 let lastRenderAt = 0;    // for particle animation
 
@@ -513,7 +528,7 @@ function setPhase(next, now) {
   if (next === PHASE.EQUIPPED) {
     equipAt = now;
     particleBurstAt = now;
-    lastSnapAt = now;           // no accidental trigger on the equip gesture
+    snapLockUntil = now + EQUIP_GUARD_MS;   // don't self-trigger on the equip gesture
     equipFlashEl.classList.remove('go');
     void equipFlashEl.offsetWidth;   // restart the animation
     equipFlashEl.classList.add('go');
@@ -1220,6 +1235,7 @@ function updateParticles(dt, modelScale, now) {
 /* ---------------- start ---------------- */
 startBtn.addEventListener('click', async () => {
   startBtn.disabled = true;
+  initAudio();   // must happen inside the click, browsers require the gesture
   try {
     statusEl.textContent = 'Loading hand model… 載入手部模型中…';
     const vision = await FilesetResolver.forVisionTasks(
@@ -1305,6 +1321,15 @@ function tick() {
   // slow self-rotation, independent of the hand so it never looks jittery
   if (spinner) spinner.rotation.y = (now / 1000) * MODEL_SPIN_SPEED;
 
+  // say why snapping is doing nothing, rather than just ignoring the user
+  if (equipped()) {
+    const left = snapLockUntil - now;
+    const txt = left > 0
+      ? `冷卻中 ${(left / 1000).toFixed(1)}s  ·  cooling down`
+      : HINTS[PHASE.EQUIPPED];
+    if (hint.textContent !== txt) hint.textContent = txt;
+  }
+
   const rdt = lastRenderAt ? Math.min((now - lastRenderAt) / 1000, 0.1) : 1 / 60;
   lastRenderAt = now;
   if (model.visible) updateParticles(rdt, model.scale.x, now);
@@ -1378,8 +1403,8 @@ function processHands(result) {
   } else {
     if (pinchDist > RELEASE_OFF) {
       primed = false;
-      if (now - primedAt < SNAP_WINDOW_MS && now - lastSnapAt > COOLDOWN_MS) {
-        lastSnapAt = now;
+      if (now - primedAt < SNAP_WINDOW_MS && now >= snapLockUntil) {
+        snapLockUntil = now + SNAP_LOCK_MS;
         particleBurstAt = now;
         // midpoint of the two fingers that did the snapping, in screen px
         const a = toScreen(smooth[4]), b = toScreen(smooth[12]);
@@ -1451,10 +1476,76 @@ function drawDot(lm, color) {
   ctx.fill();
 }
 
+/* ---------------- sound ---------------- */
+let audioCtx = null, snapSfx = null, videoSfx = null, videoSfxStop = null;
+
+function wireSound(src) {
+  const el = new Audio(src);
+  el.preload = 'auto';
+  const gain = audioCtx.createGain();
+  gain.gain.value = 0;
+  audioCtx.createMediaElementSource(el).connect(gain).connect(audioCtx.destination);
+  return { el, gain };
+}
+
+// Called from the start button, which is the user gesture browsers require.
+function initAudio() {
+  try {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    snapSfx  = wireSound(SNAP_SFX_SRC);
+    videoSfx = wireSound(VIDEO_SFX_SRC);
+  } catch (e) {
+    console.warn('audio unavailable:', e.message);
+  }
+}
+
+function playSnapSfx() {
+  if (!snapSfx) return;
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  const t = audioCtx.currentTime;
+  snapSfx.gain.gain.cancelScheduledValues(t);
+  snapSfx.gain.gain.setValueAtTime(SNAP_SFX_VOLUME, t);
+  snapSfx.el.currentTime = 0;
+  snapSfx.el.play().catch(() => {});
+}
+
+// Only a slice of the track, ramped in and out.
+function playVideoSfx() {
+  if (!videoSfx) return;
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  const g = videoSfx.gain.gain, t = audioCtx.currentTime;
+  const dur = VIDEO_SFX_SECONDS;
+  const fi  = Math.min(VIDEO_SFX_FADE_IN, dur / 2);
+  const fo  = Math.min(VIDEO_SFX_FADE_OUT, dur - fi);
+
+  g.cancelScheduledValues(t);
+  g.setValueAtTime(0, t);
+  g.linearRampToValueAtTime(VIDEO_SFX_VOLUME, t + fi);
+  g.setValueAtTime(VIDEO_SFX_VOLUME, t + dur - fo);
+  g.linearRampToValueAtTime(0, t + dur);
+
+  videoSfx.el.currentTime = VIDEO_SFX_START;
+  videoSfx.el.play().catch(() => {});
+  clearTimeout(videoSfxStop);
+  videoSfxStop = setTimeout(() => videoSfx.el.pause(), dur * 1000 + 80);
+}
+
+// Duck out early if the video is dismissed before the slice finishes.
+function stopVideoSfx() {
+  if (!videoSfx || videoSfx.el.paused) return;
+  clearTimeout(videoSfxStop);
+  const g = videoSfx.gain.gain, t = audioCtx.currentTime;
+  g.cancelScheduledValues(t);
+  g.setValueAtTime(g.value, t);
+  g.linearRampToValueAtTime(0, t + 0.2);
+  videoSfxStop = setTimeout(() => videoSfx.el.pause(), 240);
+}
+
 // Where on screen the snap happened, so the video can grow out of that spot.
 let popPoint = null;
 
 function onSnap(at) {
+  playSnapSfx();
   snapFlash.classList.add('show');
   setTimeout(() => snapFlash.classList.remove('show'), 500);
 
@@ -1499,9 +1590,11 @@ function onSnap(at) {
     hint.textContent = 'Video play failed 影片播放失敗: ' + err.message;
     player.style.display = 'none';
   });
+  playVideoSfx();
 }
 
 player.addEventListener('ended', () => {
+  stopVideoSfx();   // no-op if the slice already faded itself out
   // shrink back into the same spot it came from
   const p = popPoint || { x: screenW / 2, y: screenH / 2 };
   player.classList.remove('blast');     // the keyframes' fill would win otherwise
